@@ -1,0 +1,148 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build g++ \
+            qt6-base-dev qt6-base-dev-tools \
+            libqt6core6 libqt6gui6 libqt6widgets6 libqt6network6 libqt6dbus6 \
+            libsecret-1-dev \
+            pkg-config
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQTRDP_BUILD_TESTS=OFF -DQTRDP_BUILD_NATIVE_BACKEND=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Package .deb
+        run: cpack --config build/CPackConfig.cmake
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: '*.deb'
+
+  build-appimage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build g++ \
+            qt6-base-dev qt6-base-dev-tools \
+            libsecret-1-dev pkg-config \
+            libfuse2
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQTRDP_BUILD_TESTS=OFF -DQTRDP_BUILD_NATIVE_BACKEND=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Download AppImage tools
+        run: |
+          curl -L -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -L -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x linuxdeploy appimagetool
+
+      - name: Build AppImage
+        env:
+          LINUXDEPLOY: ${{ github.workspace }}/linuxdeploy
+          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
+        run: packaging/build-appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*.AppImage
+
+  build-flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.kde.Platform//6.10 org.kde.Sdk//6.10
+
+      - name: Build Flatpak
+        run: packaging/build-flatpak.sh
+
+      - name: Upload Flatpak
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: dist/*.flatpak
+
+  release:
+    needs: [build-deb, build-appimage, build-flatpak]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/deb/*.deb
+            artifacts/appimage/*.AppImage
+            artifacts/flatpak/*.flatpak
+          body: |
+            ## QtRDP ${{ github.ref_name }}
+
+            ### Paquetes incluidos
+            - **.deb** — Debian/Ubuntu (requiere `freerdp3-x11`)
+            - **AppImage** — Ejecutable portable
+            - **Flatpak** — Instalable con `flatpak install --user`
+
+            ### Instalación
+
+            **.deb:**
+            ```bash
+            sudo apt install ./qtrdp_*.deb
+            ```
+
+            **AppImage:**
+            ```bash
+            chmod +x QtRDP-*.AppImage
+            ./QtRDP-*.AppImage
+            ```
+
+            **Flatpak:**
+            ```bash
+            flatpak install --user ./QtRDP-*.flatpak
+            flatpak run org.qtrdp.QtRDP
+            ```

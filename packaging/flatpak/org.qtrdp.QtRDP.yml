@@ -1,0 +1,117 @@
+app-id: org.qtrdp.QtRDP
+runtime: org.kde.Platform
+runtime-version: '6.10'
+sdk: org.kde.Sdk
+command: qtrdp
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=home
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.freedesktop.Notifications
+  - --system-talk-name=org.freedesktop.Avahi
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/doc
+  - /share/man
+  - /share/pkgconfig
+
+modules:
+  - name: json-c
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_TESTING=OFF
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    sources:
+      - type: git
+        url: https://github.com/json-c/json-c.git
+        tag: json-c-0.17-20230812
+
+  - name: uriparser
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DURIPARSER_BUILD_TESTS=OFF
+      - -DURIPARSER_BUILD_DOCS=OFF
+      - -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    sources:
+      - type: git
+        url: https://github.com/uriparser/uriparser.git
+        tag: uriparser-0.9.8
+
+  - name: krb5
+    buildsystem: autotools
+    subdir: src
+    build-options:
+      cflags: -std=gnu99
+      cxxflags: -std=gnu++17
+    config-opts:
+      - --disable-static
+      - --disable-rpath
+      - --without-keyutils
+    sources:
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/k/krb5/krb5_1.21.3.orig.tar.gz
+        sha256: b7a4cd5ead67fb08b980b21abd150ff7217e85ea320c9ed0c6dadd304840ad35
+
+  - name: freerdp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DALLOW_IN_SOURCE_BUILD=ON
+      - -DWITH_SERVER=OFF
+      - -DWITH_PROXY=OFF
+      - -DWITH_SAMPLE=OFF
+      - -DWITH_CLIENT_SDL=OFF
+      - -DWITH_X11=ON
+      - -DWITH_WAYLAND=ON
+      - -DWITH_FFMPEG=OFF
+      - -DWITH_PULSE=ON
+      - -DWITH_ALSA=OFF
+      - -DWITH_CUPS=ON
+      - -DWITH_WEBVIEW=OFF
+      - -DWITH_PKCS11=OFF
+      - -DWITH_OPENH264=OFF
+      - -DWITH_FUSE=OFF
+      - -DWITH_FUSE3=OFF
+      - -DBINARY_VERSIONING=ON
+      - -DCHANNEL_RDPSND=ON
+      - -DCHANNEL_AUDIN=ON
+      - -DCHANNEL_RDPDR=ON
+      - -DCHANNEL_CLIPRDR=ON
+      - -DCHANNEL_DISP=ON
+      - -DCHANNEL_RDPEI=ON
+      - -DCHANNEL_GEOMETRY=ON
+      - -DCHANNEL_AINPUT=ON
+      - -DCHANNEL_RAIL=ON
+      - -DWITH_THREADED_DECODE=ON
+      - -DBUILD_TESTING=OFF
+    sources:
+      - type: git
+        url: https://github.com/FreeRDP/FreeRDP.git
+        tag: 3.32.1
+
+  - name: qtrdp
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DQTRDP_BUILD_TESTS=OFF
+      - -DQTRDP_BUILD_NATIVE_BACKEND=OFF
+    sources:
+      - type: dir
+        path: ../..
+    post-install:
+      - mv /app/share/applications/qtrdp.desktop /app/share/applications/org.qtrdp.QtRDP.desktop
+      - desktop-file-edit --set-key=Icon --set-value=org.qtrdp.QtRDP /app/share/applications/org.qtrdp.QtRDP.desktop
+      - mv /app/share/icons/hicolor/scalable/apps/qtrdp.svg /app/share/icons/hicolor/scalable/apps/org.qtrdp.QtRDP.svg
+

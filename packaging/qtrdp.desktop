@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Conexión de Escritorio remoto
+GenericName=Cliente RDP
+Comment=Conéctate a un equipo remoto mediante RDP
+Exec=qtrdp %u
+Icon=qtrdp
+Terminal=false
+Categories=Network;RemoteAccess;
+MimeType=application/x-rdp;
+Keywords=RDP;remote;desktop;escritorio;remoto;
+StartupWMClass=qtrdp
+StartupNotify=true

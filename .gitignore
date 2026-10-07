@@ -1,0 +1,42 @@
+# Third party (FreeRDP source tree, 89MB)
+third_party/
+
+# Build directories
+build/
+build-shadow/
+build-flatpak/
+build-flatpak-test/
+dist/
+_CPack_Packages/
+.flatpak-builder/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!cmake/*.cmake
+
+# Compiled
+*.o
+*.so
+*.a
+*.exe
+moc_*
+qrc_*
+ui_*
+
+# IDE
+.idea/
+.vscode/
+*.user
+*.swp
+*~
+
+# Credentials
+credenciales.dat
+
+# Temporary
+*.log
+/tmp/
