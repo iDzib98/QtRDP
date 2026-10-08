@@ -33,9 +33,9 @@ endif()
 if(QTRDP_BUILD_NATIVE_BACKEND)
     include(FreeRDP)
 endif()
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Network DBus)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network DBus)
 if(QTRDP_BUILD_TESTS)
-    find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Test)
 endif()
 
 set(QTRDP_SOURCES
@@ -139,5 +139,5 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "net")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "freerdp3-x11, libqt6core6, libqt6gui6, libqt6widgets6, libsecret-1-0")
+    "freerdp3-x11, libqt6core6, libqt6gui6, libqt6widgets6, libqt6network6, libqt6dbus6, libsecret-1-0")
 include(CPack)

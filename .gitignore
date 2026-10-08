@@ -7,6 +7,7 @@ build-shadow/
 build-flatpak/
 build-flatpak-test/
 dist/
+/*.deb
 _CPack_Packages/
 .flatpak-builder/
 
