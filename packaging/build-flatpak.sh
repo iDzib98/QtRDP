@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build-flatpak}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-$(sed -n 's/^[[:space:]]*VERSION[[:space:]]*//p' "${ROOT_DIR}/CMakeLists.txt" | head -n 1)}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.1}"
 
 if ! command -v flatpak-builder >/dev/null 2>&1; then
     echo "flatpak-builder no está instalado. Instale con:" >&2
@@ -42,7 +44,7 @@ flatpak-builder \
 
 flatpak build-bundle \
     "${BUILD_DIR}/repo" \
-    "${OUTPUT_DIR}/QtRDP-0.1.0-x86_64.flatpak" \
+    "${OUTPUT_DIR}/QtRDP-${PACKAGE_VERSION}-x86_64.flatpak" \
     org.qtrdp.QtRDP
 
-echo "Flatpak generado en ${OUTPUT_DIR}/QtRDP-0.1.0-x86_64.flatpak"
+echo "Flatpak generado en ${OUTPUT_DIR}/QtRDP-${PACKAGE_VERSION}-x86_64.flatpak"

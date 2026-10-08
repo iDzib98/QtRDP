@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-$(sed -n 's/^[[:space:]]*VERSION[[:space:]]*//p' "${ROOT_DIR}/CMakeLists.txt" | head -n 1)}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.1}"
 LINUXDEPLOY="${LINUXDEPLOY:-linuxdeploy}"
 APPIMAGETOOL="${APPIMAGETOOL:-appimagetool}"
 
@@ -40,5 +42,5 @@ pushd "${BUILD_DIR}" >/dev/null
     --output appimage
 popd >/dev/null
 
-mv "${BUILD_DIR}"/*.AppImage "${OUTPUT_DIR}/QtRDP-${PROJECT_VERSION:-0.1.0}-x86_64.AppImage"
-printf 'AppImage generado en %s\n' "${OUTPUT_DIR}/QtRDP-${PROJECT_VERSION:-0.1.0}-x86_64.AppImage"
+mv "${BUILD_DIR}"/*.AppImage "${OUTPUT_DIR}/QtRDP-${PACKAGE_VERSION}-x86_64.AppImage"
+printf 'AppImage generado en %s\n' "${OUTPUT_DIR}/QtRDP-${PACKAGE_VERSION}-x86_64.AppImage"

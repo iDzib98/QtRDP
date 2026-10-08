@@ -23,20 +23,20 @@ Cliente de escritorio remoto RDP para Linux con una interfaz inspirada en mstsc.
 ### .deb (Debian/Ubuntu)
 
 ```bash
-sudo apt install ./qtrdp_0.1.0_amd64.deb
+sudo apt install ./qtrdp_*.deb
 ```
 
 ### AppImage
 
 ```bash
-chmod +x QtRDP-0.1.0-x86_64.AppImage
-./QtRDP-0.1.0-x86_64.AppImage
+chmod +x QtRDP-*-x86_64.AppImage
+./QtRDP-*-x86_64.AppImage
 ```
 
 ### Flatpak
 
 ```bash
-flatpak install --user ./QtRDP-0.1.0-x86_64.flatpak
+flatpak install --user ./QtRDP-*-x86_64.flatpak
 flatpak run org.qtrdp.QtRDP
 ```
 
