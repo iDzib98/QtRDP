@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(QtRDP
-    VERSION 0.1.1
+    VERSION 0.2.0
     DESCRIPTION "Cliente de escritorio remoto estilo mstsc.exe para Linux"
     LANGUAGES C CXX)
 
@@ -30,6 +30,8 @@ if(QTRDP_ENABLE_KEYRING)
     pkg_check_modules(LIBSECRET QUIET IMPORTED_TARGET libsecret-1)
 endif()
 
+find_package(X11 REQUIRED)
+
 if(QTRDP_BUILD_NATIVE_BACKEND)
     include(FreeRDP)
 endif()
@@ -53,6 +55,8 @@ set(QTRDP_SOURCES
     src/core/CredentialFormat.cpp
     src/core/XFreeRdpLauncher.h
     src/core/XFreeRdpLauncher.cpp
+    src/core/GnomeFullscreen.h
+    src/core/GnomeFullscreen.cpp
     src/core/SessionTypes.h
     src/core/SessionBackend.h
 
@@ -81,6 +85,7 @@ qt_add_executable(qtrdp ${QTRDP_SOURCES})
 
 target_include_directories(qtrdp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    ${X11_INCLUDE_DIR}
 )
 
 if(QTRDP_BUILD_NATIVE_BACKEND)
@@ -100,6 +105,7 @@ endif()
 
 target_link_libraries(qtrdp PRIVATE
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::DBus
+    ${X11_LIBRARIES}
 )
 
 if(QTRDP_BUILD_NATIVE_BACKEND)
@@ -139,5 +145,5 @@ set(CPACK_DEBIAN_PACKAGE_SECTION "net")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "freerdp3-x11, libqt6core6, libqt6gui6, libqt6widgets6, libqt6network6, libqt6dbus6, libsecret-1-0")
+    "freerdp3-x11, libqt6core6, libqt6gui6, libqt6widgets6, libqt6network6, libqt6dbus6, libsecret-1-0, libx11-6")
 include(CPack)

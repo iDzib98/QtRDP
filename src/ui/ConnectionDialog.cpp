@@ -2,14 +2,17 @@
 
 #include "core/CredentialStore.h"
 #include "core/RdpFile.h"
+#include "core/XFreeRdpLauncher.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDialog>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -19,8 +22,11 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPair>
+#include <QPlainTextEdit>
 #include <QPushButton>
-#include <QCheckBox>
+#include <QResizeEvent>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStyle>
@@ -38,6 +44,104 @@ QString settingsFilePath()
 {
     return ProfileStore::defaultFilePath();
 }
+
+// Ajusta el texto a un ancho dado insertando saltos de línea en los espacios,
+// para que las casillas con rótulos largos no fuercen el scroll horizontal.
+QString wrapToWidth(const QString& text, const QFontMetrics& metrics, int width)
+{
+    if (width <= 0 || text.isEmpty())
+        return text;
+
+    QString result;
+    QString line;
+    const QStringList words = text.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    for (const QString& word : words)
+    {
+        const QString candidate = line.isEmpty() ? word : line + QLatin1Char(' ') + word;
+        if (!line.isEmpty() && metrics.horizontalAdvance(candidate) > width)
+        {
+            result += line + QLatin1Char('\n');
+            line = word;
+        }
+        else
+        {
+            line = candidate;
+        }
+    }
+    result += line;
+    return result;
+}
+
+// QCheckBox no ajusta el texto por sí solo; esta subclase lo reparte en varias
+// líneas y acota el ancho solicitado, de modo que un rótulo largo no fuerce el
+// scroll horizontal del diálogo.
+class WrappingCheckBox : public QCheckBox
+{
+public:
+    explicit WrappingCheckBox(const QString& text, QWidget* parent = nullptr)
+        : QCheckBox(parent), m_fullText(text)
+    {
+        QCheckBox::setText(text);
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    }
+
+    QSize sizeHint() const override
+    {
+        const QFontMetrics fm(fontMetrics());
+        const int indicator = indicatorWidth();
+        const int textWidth =
+            qMax(80, (m_wrapWidth > 0 ? m_wrapWidth : kPreferredWrapWidth) - indicator);
+        const QRect bounds =
+            fm.boundingRect(QRect(0, 0, textWidth, 0), Qt::TextWordWrap, m_fullText);
+        return QSize(bounds.width() + indicator,
+                     qMax(QCheckBox::sizeHint().height(), bounds.height()));
+    }
+
+    QSize minimumSizeHint() const override
+    {
+        QSize hint = QCheckBox::minimumSizeHint();
+        hint.setWidth(qMin(hint.width(), indicatorWidth() + 80));
+        return hint;
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QCheckBox::resizeEvent(event);
+        rewrap();
+    }
+
+    void changeEvent(QEvent* event) override
+    {
+        QCheckBox::changeEvent(event);
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+        {
+            m_wrapWidth = -1;
+            rewrap();
+        }
+    }
+
+private:
+    int indicatorWidth() const
+    {
+        return style()->pixelMetric(QStyle::PM_IndicatorWidth) +
+               style()->pixelMetric(QStyle::PM_CheckBoxLabelSpacing);
+    }
+
+    void rewrap()
+    {
+        const int available = width() - indicatorWidth();
+        if (available <= 0 || available == m_wrapWidth)
+            return;
+        m_wrapWidth = available;
+        QCheckBox::setText(wrapToWidth(m_fullText, fontMetrics(), available));
+        updateGeometry();
+    }
+
+    static constexpr int kPreferredWrapWidth = 520;
+    QString m_fullText;
+    int m_wrapWidth = -1;
+};
 
 } // namespace
 
@@ -127,11 +231,39 @@ void ConnectionDialog::buildUi()
     optionsLayout->setSpacing(4);
     m_tabs = new QTabWidget(m_optionsPanel);
     m_tabs->setObjectName(QStringLiteral("connectionOptionsTabs"));
-    m_tabs->addTab(buildForm(), QStringLiteral("General"));
-    m_tabs->addTab(buildScreenPage(), QStringLiteral("Pantalla"));
-    m_tabs->addTab(buildLocalResourcesPage(), QStringLiteral("Recursos locales"));
-    m_tabs->addTab(buildPerformancePage(), QStringLiteral("Rendimiento"));
-    m_tabs->addTab(buildAdvancedPage(), QStringLiteral("Opciones avanzadas"));
+    const auto addScrollableTab = [this](QWidget* content, const QString& title)
+    {
+        auto* area = new QScrollArea(m_tabs);
+        area->setWidget(content);
+        area->setWidgetResizable(true);
+        area->setFrameShape(QFrame::NoFrame);
+        m_tabs->addTab(area, title);
+    };
+    addScrollableTab(buildForm(), QStringLiteral("General"));
+    addScrollableTab(buildScreenPage(), QStringLiteral("Pantalla"));
+    addScrollableTab(buildLocalResourcesPage(), QStringLiteral("Recursos locales"));
+    addScrollableTab(buildPerformancePage(), QStringLiteral("Rendimiento"));
+    addScrollableTab(buildAdvancedPage(), QStringLiteral("Opciones avanzadas"));
+
+    // El «modo desarrollo» muestra el comando de xfreerdp resultante; estos
+    // enlaces lo mantienen actualizado ante cualquier cambio del formulario.
+    // Se usa un temporizador para no reconstruir el comando en cada pulsación.
+    m_commandPreviewTimer = new QTimer(this);
+    m_commandPreviewTimer->setSingleShot(true);
+    m_commandPreviewTimer->setInterval(150);
+    connect(m_commandPreviewTimer, &QTimer::timeout, this,
+            &ConnectionDialog::updateCommandPreview);
+    const auto schedulePreview = [this]() { m_commandPreviewTimer->start(); };
+
+    for (QCheckBox* box : m_tabs->findChildren<QCheckBox*>())
+        connect(box, &QCheckBox::toggled, this, schedulePreview);
+    for (QComboBox* combo : m_tabs->findChildren<QComboBox*>())
+        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, schedulePreview);
+    for (QLineEdit* edit : m_tabs->findChildren<QLineEdit*>())
+        connect(edit, &QLineEdit::textChanged, this, schedulePreview);
+    for (QSpinBox* spin : m_tabs->findChildren<QSpinBox*>())
+        connect(spin, QOverload<int>::of(&QSpinBox::valueChanged), this, schedulePreview);
+
     optionsLayout->addWidget(m_tabs);
     layout->addWidget(m_optionsPanel, 1);
     m_optionsPanel->hide();
@@ -308,7 +440,8 @@ QWidget* ConnectionDialog::buildForm()
     m_hostEdit->setObjectName(QStringLiteral("hostEdit"));
     m_hostEdit->setPlaceholderText(QStringLiteral("Ejemplo: equipo.fabrikam.com"));
     m_hostEdit->setClearButtonEnabled(true);
-    form->addRow(QStringLiteral("Equipo:"), m_hostEdit);
+    addFormRowWithHint(form, QStringLiteral("Equipo:"), m_hostEdit,
+                       QStringLiteral("/v:<equipo>[:<puerto>]"));
 
     auto* portRow = new QHBoxLayout;
     m_portSpin = new QSpinBox(this);
@@ -318,22 +451,26 @@ QWidget* ConnectionDialog::buildForm()
     portRow->addWidget(m_portSpin);
     portRow->addStretch(1);
     form->addRow(QStringLiteral("Puerto:"), portRow);
+    addHintRow(form, m_portSpin, QStringLiteral("/v:<equipo>:<puerto>"));
 
     m_userEdit = new QLineEdit(this);
     m_userEdit->setObjectName(QStringLiteral("userEdit"));
     m_userEdit->setPlaceholderText(QStringLiteral("usuario"));
-    form->addRow(QStringLiteral("Usuario:"), m_userEdit);
+    addFormRowWithHint(form, QStringLiteral("Usuario:"), m_userEdit,
+                       QStringLiteral("/u:<usuario>"));
 
     m_domainEdit = new QLineEdit(this);
     m_domainEdit->setObjectName(QStringLiteral("domainEdit"));
     m_domainEdit->setPlaceholderText(QStringLiteral("opcional — dejar vacío si no hay dominio"));
-    form->addRow(QStringLiteral("Dominio:"), m_domainEdit);
+    addFormRowWithHint(form, QStringLiteral("Dominio:"), m_domainEdit,
+                       QStringLiteral("/d:<dominio>"));
 
     m_passwordEdit = new QLineEdit(this);
     m_passwordEdit->setObjectName(QStringLiteral("passwordEdit"));
     m_passwordEdit->setEchoMode(QLineEdit::Password);
     m_passwordEdit->setPlaceholderText(QStringLiteral("contraseña"));
-    form->addRow(QStringLiteral("Contraseña:"), m_passwordEdit);
+    addFormRowWithHint(form, QStringLiteral("Contraseña:"), m_passwordEdit,
+                       QStringLiteral("/p:<contraseña>"));
 
     m_passwordHint = new QLabel(this);
     m_passwordHint->setObjectName(QStringLiteral("passwordHint"));
@@ -341,20 +478,23 @@ QWidget* ConnectionDialog::buildForm()
     m_passwordHint->setWordWrap(true);
     form->addRow(QString(), m_passwordHint);
 
-    m_rememberUserCheck = new QCheckBox(QStringLiteral("Recordar mi usuario"), this);
+    m_rememberUserCheck = new WrappingCheckBox(QStringLiteral("Recordar mi usuario"), this);
     m_rememberUserCheck->setChecked(true);
-    form->addRow(QString(), m_rememberUserCheck);
+    addFormRowWithHint(form, QString(), m_rememberUserCheck,
+                       QStringLiteral("(Solo local: no envía parámetros a xfreerdp)"));
 
-    m_rememberPasswordCheck = new QCheckBox(QStringLiteral("Recordar contraseña"), this);
+    m_rememberPasswordCheck = new WrappingCheckBox(QStringLiteral("Recordar contraseña"), this);
     m_rememberPasswordCheck->setObjectName(QStringLiteral("rememberPasswordCheck"));
-    form->addRow(QString(), m_rememberPasswordCheck);
+    addFormRowWithHint(form, QString(), m_rememberPasswordCheck,
+                       QStringLiteral("(Solo local: no envía parámetros a xfreerdp)"));
 
     auto* accountGroup = new QGroupBox(QStringLiteral("Configuración de la conexión"), page);
     auto* accountLayout = new QVBoxLayout(accountGroup);
     accountLayout->setContentsMargins(10, 16, 10, 8);
     accountLayout->setSpacing(5);
     auto* profileNameRow = new QFormLayout;
-    profileNameRow->addRow(QStringLiteral("Nombre del perfil:"), m_profileNameEdit);
+    addFormRowWithHint(profileNameRow, QStringLiteral("Nombre del perfil:"), m_profileNameEdit,
+                       QStringLiteral("/title:<nombre>"));
     accountLayout->addLayout(profileNameRow);
     accountLayout->addWidget(buildProfileList(), 1);
 
@@ -413,6 +553,8 @@ QWidget* ConnectionDialog::buildScreenPage()
     m_resolutionCombo->addItem(QStringLiteral("2560 × 1440"));
     m_resolutionCombo->addItem(QStringLiteral("3840 × 2160"));
     screenForm->addRow(QStringLiteral("Tamaño del escritorio remoto:"), m_resolutionCombo);
+    addHintRow(screenForm, m_resolutionCombo,
+               QStringLiteral("/size:<ancho>x<alto> · /f · /dynamic-resolution"));
 
     m_colorDepthCombo = new QComboBox(screenGroup);
     m_colorDepthCombo->setObjectName(QStringLiteral("colorDepthCombo"));
@@ -420,20 +562,51 @@ QWidget* ConnectionDialog::buildScreenPage()
     m_colorDepthCombo->addItem(QStringLiteral("Alta calidad (24 bits)"), 24);
     m_colorDepthCombo->addItem(QStringLiteral("Media (16 bits)"), 16);
     m_colorDepthCombo->addItem(QStringLiteral("Baja (8 bits)"), 8);
-    screenForm->addRow(QStringLiteral("Colores:"), m_colorDepthCombo);
+    addFormRowWithHint(screenForm, QStringLiteral("Colores:"), m_colorDepthCombo,
+                       QStringLiteral("/bpp:<bits>"));
 
-    m_dynamicResolutionCheck = new QCheckBox(
+    m_dynamicResolutionCheck = new WrappingCheckBox(
         QStringLiteral("Cambiar el tamaño del escritorio remoto al cambiar el tamaño de la ventana"),
         screenGroup);
     m_dynamicResolutionCheck->setObjectName(QStringLiteral("dynamicResolutionCheck"));
-    screenForm->addRow(QString(), m_dynamicResolutionCheck);
-    m_multimonCheck = new QCheckBox(
+    addFormRowWithHint(screenForm, QString(), m_dynamicResolutionCheck,
+                       QStringLiteral("/dynamic-resolution"));
+    m_multimonCheck = new WrappingCheckBox(
         QStringLiteral("Usar todos mis monitores para la sesión remota"), screenGroup);
-    screenForm->addRow(QString(), m_multimonCheck);
-    m_connectionBarCheck = new QCheckBox(
+    addFormRowWithHint(screenForm, QString(), m_multimonCheck, QStringLiteral("/multimon"));
+    m_connectionBarCheck = new WrappingCheckBox(
         QStringLiteral("Mostrar la barra de conexión cuando se use pantalla completa"),
         screenGroup);
-    screenForm->addRow(QString(), m_connectionBarCheck);
+    addFormRowWithHint(
+        screenForm, QString(), m_connectionBarCheck,
+        QStringLiteral("/floatbar:sticky:on,default:visible,show:always"));
+
+    m_scaleCombo = new QComboBox(screenGroup);
+    m_scaleCombo->setObjectName(QStringLiteral("scaleCombo"));
+    m_scaleCombo->addItem(QStringLiteral("Sin escala (100 %)"), 100);
+    m_scaleCombo->addItem(QStringLiteral("Escala del 140 %"), 140);
+    m_scaleCombo->addItem(QStringLiteral("Escala del 180 %"), 180);
+    addFormRowWithHint(screenForm, QStringLiteral("Escala del escritorio:"), m_scaleCombo,
+                       QStringLiteral("/scale:<porcentaje>"));
+
+    m_orientationCombo = new QComboBox(screenGroup);
+    m_orientationCombo->setObjectName(QStringLiteral("orientationCombo"));
+    m_orientationCombo->addItem(QStringLiteral("Normal (0°)"), 0);
+    m_orientationCombo->addItem(QStringLiteral("90°"), 90);
+    m_orientationCombo->addItem(QStringLiteral("180°"), 180);
+    m_orientationCombo->addItem(QStringLiteral("270°"), 270);
+    addFormRowWithHint(screenForm, QStringLiteral("Orientación de la pantalla:"), m_orientationCombo,
+                       QStringLiteral("/orientation:<grados>"));
+
+    m_spanMonitorsCheck = new WrappingCheckBox(
+        QStringLiteral("Expandir la sesión por todos los monitores (span)"), screenGroup);
+    m_spanMonitorsCheck->setObjectName(QStringLiteral("spanMonitorsCheck"));
+    addFormRowWithHint(screenForm, QString(), m_spanMonitorsCheck, QStringLiteral("+span"));
+    m_smartSizingCheck = new WrappingCheckBox(
+        QStringLiteral("Ajustar el escritorio remoto al tamaño de la ventana"), screenGroup);
+    m_smartSizingCheck->setObjectName(QStringLiteral("smartSizingCheck"));
+    addFormRowWithHint(screenForm, QString(), m_smartSizingCheck,
+                       QStringLiteral("+smart-sizing"));
 
     layout->addWidget(screenGroup);
     layout->addStretch(1);
@@ -448,11 +621,11 @@ QWidget* ConnectionDialog::buildLocalResourcesPage()
 
     auto* audioGroup = new QGroupBox(QStringLiteral("Audio remoto"), page);
     auto* audioLayout = new QVBoxLayout(audioGroup);
-    m_audioCheck = new QCheckBox(QStringLiteral("Reproducir el audio en este equipo"), audioGroup);
+    m_audioCheck = new WrappingCheckBox(QStringLiteral("Reproducir el audio en este equipo"), audioGroup);
     m_audioCheck->setObjectName(QStringLiteral("redirectAudioCheck"));
-    m_microphoneCheck = new QCheckBox(QStringLiteral("Grabar desde este equipo"), audioGroup);
-    audioLayout->addWidget(m_audioCheck);
-    audioLayout->addWidget(m_microphoneCheck);
+    m_microphoneCheck = new WrappingCheckBox(QStringLiteral("Grabar desde este equipo"), audioGroup);
+    addWidgetWithHint(audioLayout, m_audioCheck, QStringLiteral("/sound"));
+    addWidgetWithHint(audioLayout, m_microphoneCheck, QStringLiteral("/microphone"));
     layout->addWidget(audioGroup);
 
     auto* keyboardGroup = new QGroupBox(QStringLiteral("Teclado"), page);
@@ -463,31 +636,45 @@ QWidget* ConnectionDialog::buildLocalResourcesPage()
                              QStringLiteral("fullscreen"));
     m_keyboardCombo->addItem(QStringLiteral("En este equipo"), QStringLiteral("local"));
     m_keyboardCombo->addItem(QStringLiteral("En el equipo remoto"), QStringLiteral("remote"));
-    keyboardForm->addRow(QStringLiteral("Aplicar combinaciones de teclas de Windows:"),
-                         m_keyboardCombo);
+    addFormRowWithHint(keyboardForm,
+                       QStringLiteral("Aplicar combinaciones de teclas de Windows:"),
+                       m_keyboardCombo, QStringLiteral("-grab-keyboard (solo «En el equipo remoto»)"));
     layout->addWidget(keyboardGroup);
 
     auto* devicesGroup = new QGroupBox(QStringLiteral("Dispositivos y recursos locales"), page);
     auto* devicesLayout = new QVBoxLayout(devicesGroup);
-    m_clipboardCheck = new QCheckBox(QStringLiteral("Portapapeles"), devicesGroup);
-    m_drivesCheck = new QCheckBox(QStringLiteral("Unidades"), devicesGroup);
-    m_printersCheck = new QCheckBox(QStringLiteral("Impresoras"), devicesGroup);
-    m_homeDriveCheck = new QCheckBox(QStringLiteral("Compartir mi carpeta personal"), devicesGroup);
-    m_redirectPortsCheck = new QCheckBox(QStringLiteral("Puertos"), devicesGroup);
-    m_redirectSmartCardsCheck = new QCheckBox(QStringLiteral("Tarjetas inteligentes"), devicesGroup);
-    devicesLayout->addWidget(m_clipboardCheck);
-    devicesLayout->addWidget(m_drivesCheck);
+    m_clipboardCheck = new WrappingCheckBox(QStringLiteral("Portapapeles"), devicesGroup);
+    m_clipboardFilesCheck =
+        new WrappingCheckBox(QStringLiteral("Permitir copiar archivos por el portapapeles"), devicesGroup);
+    m_clipboardFilesCheck->setObjectName(QStringLiteral("clipboardFilesCheck"));
+    m_drivesCheck = new WrappingCheckBox(QStringLiteral("Unidades"), devicesGroup);
+    m_printersCheck = new WrappingCheckBox(QStringLiteral("Impresoras"), devicesGroup);
+    m_homeDriveCheck = new WrappingCheckBox(QStringLiteral("Compartir mi carpeta personal"), devicesGroup);
+    m_redirectPortsCheck = new WrappingCheckBox(QStringLiteral("Puertos"), devicesGroup);
+    m_redirectSmartCardsCheck = new WrappingCheckBox(QStringLiteral("Tarjetas inteligentes"), devicesGroup);
+    m_multitouchCheck = new WrappingCheckBox(QStringLiteral("Entrada multitáctil"), devicesGroup);
+    m_multitouchCheck->setObjectName(QStringLiteral("multitouchCheck"));
+    addWidgetWithHint(devicesLayout, m_clipboardCheck, QStringLiteral("/clipboard"));
+    addWidgetWithHint(devicesLayout, m_clipboardFilesCheck,
+                      QStringLiteral("/clipboard:files-to:off (al desmarcarla)"));
+    addWidgetWithHint(devicesLayout, m_drivesCheck, QStringLiteral("/drive:<nombre>,<ruta>"));
     auto* drivesForm = new QFormLayout;
     m_drivesEdit = new QLineEdit(devicesGroup);
     m_drivesEdit->setObjectName(QStringLiteral("drivesEdit"));
     m_drivesEdit->setPlaceholderText(QStringLiteral("nombre,ruta; por ejemplo: home,/home/usuario"));
     drivesForm->addRow(QStringLiteral("Unidades específicas:"), m_drivesEdit);
+    addHintRow(drivesForm, m_drivesEdit, QStringLiteral("/drive:<nombre>,<ruta>"));
     devicesLayout->addLayout(drivesForm);
-    devicesLayout->addWidget(m_homeDriveCheck);
-    devicesLayout->addWidget(m_printersCheck);
-    devicesLayout->addWidget(m_redirectPortsCheck);
-    devicesLayout->addWidget(m_redirectSmartCardsCheck);
+    addWidgetWithHint(devicesLayout, m_homeDriveCheck,
+                      QStringLiteral("/drive:home,<carpeta personal>"));
+    addWidgetWithHint(devicesLayout, m_printersCheck, QStringLiteral("/printer"));
+    addWidgetWithHint(devicesLayout, m_redirectPortsCheck,
+                      QStringLiteral("(Sin parámetro en xfreerdp)"));
+    addWidgetWithHint(devicesLayout, m_redirectSmartCardsCheck, QStringLiteral("/smartcard"));
+    addWidgetWithHint(devicesLayout, m_multitouchCheck, QStringLiteral("+multitouch"));
     layout->addWidget(devicesGroup, 1);
+    connect(m_clipboardCheck, &QCheckBox::toggled, m_clipboardFilesCheck,
+            &QCheckBox::setEnabled);
     return page;
 }
 
@@ -508,25 +695,63 @@ QWidget* ConnectionDialog::buildPerformancePage()
     m_networkCombo->addItem(QStringLiteral("Banda ancha (256 Kbps - 2 Mbps)"),
                             QStringLiteral("broadband"));
     m_networkCombo->addItem(QStringLiteral("LAN (10 Mbps o superior)"), QStringLiteral("lan"));
-    networkForm->addRow(QStringLiteral("Velocidad de conexión:"), m_networkCombo);
+    addFormRowWithHint(networkForm, QStringLiteral("Velocidad de conexión:"), m_networkCombo,
+                       QStringLiteral("/network:auto|modem|broadband|lan"));
     performanceLayout->addLayout(networkForm);
 
-    m_wallpaperCheck = new QCheckBox(QStringLiteral("Fondo de escritorio"), performanceGroup);
-    m_fontSmoothingCheck = new QCheckBox(QStringLiteral("Suavizado de fuentes"), performanceGroup);
-    m_desktopCompositionCheck = new QCheckBox(QStringLiteral("Composición del escritorio"),
+    m_wallpaperCheck = new WrappingCheckBox(QStringLiteral("Fondo de escritorio"), performanceGroup);
+    m_fontSmoothingCheck = new WrappingCheckBox(QStringLiteral("Suavizado de fuentes"), performanceGroup);
+    m_desktopCompositionCheck = new WrappingCheckBox(QStringLiteral("Composición del escritorio"),
                                                performanceGroup);
-    m_animationsCheck = new QCheckBox(QStringLiteral("Animaciones de menús y ventanas"),
+    m_animationsCheck = new WrappingCheckBox(QStringLiteral("Animaciones de menús y ventanas"),
                                        performanceGroup);
-    m_bitmapCacheCheck = new QCheckBox(
+    m_bitmapCacheCheck = new WrappingCheckBox(
         QStringLiteral("Almacenamiento en caché persistente de mapas de bits"), performanceGroup);
-    m_reconnectCheck = new QCheckBox(QStringLiteral("Volver a conectarse si se pierde la conexión"),
+    m_reconnectCheck = new WrappingCheckBox(QStringLiteral("Volver a conectarse si se pierde la conexión"),
                                       performanceGroup);
-    performanceLayout->addWidget(m_wallpaperCheck);
-    performanceLayout->addWidget(m_fontSmoothingCheck);
-    performanceLayout->addWidget(m_desktopCompositionCheck);
-    performanceLayout->addWidget(m_animationsCheck);
-    performanceLayout->addWidget(m_bitmapCacheCheck);
-    performanceLayout->addWidget(m_reconnectCheck);
+    m_windowDragCheck = new WrappingCheckBox(
+        QStringLiteral("Mostrar el contenido de la ventana al arrastrarla"), performanceGroup);
+    m_windowDragCheck->setObjectName(QStringLiteral("windowDragCheck"));
+    addWidgetWithHint(performanceLayout, m_wallpaperCheck,
+                      QStringLiteral("+wallpaper / -wallpaper"));
+    addWidgetWithHint(performanceLayout, m_fontSmoothingCheck, QStringLiteral("+fonts / -fonts"));
+    addWidgetWithHint(performanceLayout, m_desktopCompositionCheck,
+                      QStringLiteral("+aero / -aero"));
+    addWidgetWithHint(performanceLayout, m_animationsCheck,
+                      QStringLiteral("+menu-anims / -menu-anims"));
+    addWidgetWithHint(performanceLayout, m_windowDragCheck, QStringLiteral("+window-drag"));
+    addWidgetWithHint(performanceLayout, m_bitmapCacheCheck,
+                      QStringLiteral("/cache:bitmap:on / off"));
+    addWidgetWithHint(performanceLayout, m_reconnectCheck,
+                      QStringLiteral("+auto-reconnect / -auto-reconnect"));
+
+    auto* codecForm = new QFormLayout;
+    m_compressionCombo = new QComboBox(performanceGroup);
+    m_compressionCombo->setObjectName(QStringLiteral("compressionCombo"));
+    m_compressionCombo->addItem(QStringLiteral("Predeterminada"), -1);
+    m_compressionCombo->addItem(QStringLiteral("Baja (0)"), 0);
+    m_compressionCombo->addItem(QStringLiteral("Media (1)"), 1);
+    m_compressionCombo->addItem(QStringLiteral("Alta (2)"), 2);
+    addFormRowWithHint(codecForm, QStringLiteral("Nivel de compresión:"), m_compressionCombo,
+                       QStringLiteral("/compression-level:<0-2>"));
+    m_gdiCombo = new QComboBox(performanceGroup);
+    m_gdiCombo->setObjectName(QStringLiteral("gdiCombo"));
+    m_gdiCombo->addItem(QStringLiteral("Predeterminado"), QStringLiteral("default"));
+    m_gdiCombo->addItem(QStringLiteral("Software (sw)"), QStringLiteral("sw"));
+    m_gdiCombo->addItem(QStringLiteral("Hardware (hw)"), QStringLiteral("hw"));
+    addFormRowWithHint(codecForm, QStringLiteral("Representación GDI:"), m_gdiCombo,
+                       QStringLiteral("/gdi:sw|hw"));
+    performanceLayout->addLayout(codecForm);
+
+    m_rfxCheck = new WrappingCheckBox(QStringLiteral("Habilitar RemoteFX (+rfx)"), performanceGroup);
+    m_nscCheck = new WrappingCheckBox(QStringLiteral("Habilitar NSCodec (+nsc)"), performanceGroup);
+    m_jpegCheck = new WrappingCheckBox(QStringLiteral("Habilitar códec JPEG (+jpeg)"), performanceGroup);
+    m_videoCheck = new WrappingCheckBox(
+        QStringLiteral("Habilitar vídeo optimizado (+video)"), performanceGroup);
+    addWidgetWithHint(performanceLayout, m_rfxCheck, QStringLiteral("+rfx"));
+    addWidgetWithHint(performanceLayout, m_nscCheck, QStringLiteral("+nsc"));
+    addWidgetWithHint(performanceLayout, m_jpegCheck, QStringLiteral("+jpeg"));
+    addWidgetWithHint(performanceLayout, m_videoCheck, QStringLiteral("+video"));
     layout->addWidget(performanceGroup);
     layout->addStretch(1);
     return page;
@@ -546,40 +771,158 @@ QWidget* ConnectionDialog::buildAdvancedPage()
     m_authWarningCombo->addItem(QStringLiteral("No conectarse si falla la autenticación"), 2);
     m_authWarningCombo->addItem(QStringLiteral("Conectarse aunque falle la autenticación"), 0);
     authLayout->addRow(QStringLiteral("Si se producen errores:"), m_authWarningCombo);
+    addHintRow(authLayout, m_authWarningCombo, QStringLiteral("/cert:deny|tofu|ignore"));
+    m_secProtocolCombo = new QComboBox(authGroup);
+    m_secProtocolCombo->setObjectName(QStringLiteral("secProtocolCombo"));
+    m_secProtocolCombo->addItem(QStringLiteral("Negociar automáticamente"), QStringLiteral("default"));
+    m_secProtocolCombo->addItem(QStringLiteral("Seguridad RDP (/sec:rdp)"), QStringLiteral("rdp"));
+    m_secProtocolCombo->addItem(QStringLiteral("TLS (/sec:tls)"), QStringLiteral("tls"));
+    m_secProtocolCombo->addItem(QStringLiteral("NLA (/sec:nla)"), QStringLiteral("nla"));
+    m_secProtocolCombo->addItem(QStringLiteral("Extended (/sec:ext)"), QStringLiteral("ext"));
+    authLayout->addRow(QStringLiteral("Protocolo de seguridad:"), m_secProtocolCombo);
+    addHintRow(authLayout, m_secProtocolCombo, QStringLiteral("/sec:rdp|tls|nla|ext"));
     layout->addWidget(authGroup);
 
     auto* gatewayGroup = new QGroupBox(QStringLiteral("Conectarse desde cualquier lugar"), page);
     auto* gatewayLayout = new QFormLayout(gatewayGroup);
-    m_gatewayCheck = new QCheckBox(
+    m_gatewayCheck = new WrappingCheckBox(
         QStringLiteral("Usar una puerta de enlace de Escritorio remoto"), gatewayGroup);
-    gatewayLayout->addRow(QString(), m_gatewayCheck);
+    addFormRowWithHint(gatewayLayout, QString(), m_gatewayCheck,
+                       QStringLiteral("/g:<servidor> y /gp:<puerto>"));
     m_gatewayHostEdit = new QLineEdit(gatewayGroup);
     m_gatewayHostEdit->setObjectName(QStringLiteral("gatewayHostEdit"));
-    gatewayLayout->addRow(QStringLiteral("Servidor de puerta de enlace:"), m_gatewayHostEdit);
+    addFormRowWithHint(gatewayLayout, QStringLiteral("Servidor de puerta de enlace:"), m_gatewayHostEdit,
+                       QStringLiteral("/g:<servidor>"));
     m_gatewayPortSpin = new QSpinBox(gatewayGroup);
     m_gatewayPortSpin->setObjectName(QStringLiteral("gatewayPortSpin"));
     m_gatewayPortSpin->setRange(1, 65535);
     m_gatewayPortSpin->setValue(443);
-    gatewayLayout->addRow(QStringLiteral("Puerto:"), m_gatewayPortSpin);
-    m_gatewaySameCredentialsCheck = new QCheckBox(
+    addFormRowWithHint(gatewayLayout, QStringLiteral("Puerto:"), m_gatewayPortSpin,
+                       QStringLiteral("/gp:<puerto>"));
+    m_gatewaySameCredentialsCheck = new WrappingCheckBox(
         QStringLiteral("Usar las mismas credenciales para la puerta de enlace"), gatewayGroup);
-    gatewayLayout->addRow(QString(), m_gatewaySameCredentialsCheck);
+    addFormRowWithHint(gatewayLayout, QString(), m_gatewaySameCredentialsCheck,
+                       QStringLiteral("(Omite /gu: reutiliza las credenciales)"));
     m_gatewayUserEdit = new QLineEdit(gatewayGroup);
     m_gatewayUserEdit->setObjectName(QStringLiteral("gatewayUserEdit"));
-    gatewayLayout->addRow(QStringLiteral("Usuario de puerta de enlace:"), m_gatewayUserEdit);
+    addFormRowWithHint(gatewayLayout, QStringLiteral("Usuario de puerta de enlace:"), m_gatewayUserEdit,
+                       QStringLiteral("/gu:<usuario>"));
     layout->addWidget(gatewayGroup);
 
     auto* appGroup = new QGroupBox(QStringLiteral("Autenticación del usuario"), page);
     auto* appLayout = new QFormLayout(appGroup);
-    m_webAccountCheck = new QCheckBox(
+    m_webAccountCheck = new WrappingCheckBox(
         QStringLiteral("Usar una cuenta web para iniciar sesión en el equipo remoto"), appGroup);
-    appLayout->addRow(QString(), m_webAccountCheck);
-    m_remoteAppCheck = new QCheckBox(QStringLiteral("Iniciar una aplicación remota"), appGroup);
-    appLayout->addRow(QString(), m_remoteAppCheck);
+    addFormRowWithHint(appLayout, QString(), m_webAccountCheck,
+                       QStringLiteral("(Sin parámetro en xfreerdp)"));
+    m_remoteAppCheck = new WrappingCheckBox(QStringLiteral("Iniciar una aplicación remota"), appGroup);
+    addFormRowWithHint(appLayout, QString(), m_remoteAppCheck, QStringLiteral("/app:<programa>"));
     m_remoteProgramEdit = new QLineEdit(appGroup);
     m_remoteProgramEdit->setObjectName(QStringLiteral("remoteProgramEdit"));
-    appLayout->addRow(QStringLiteral("Programa remoto:"), m_remoteProgramEdit);
+    addFormRowWithHint(appLayout, QStringLiteral("Programa remoto:"), m_remoteProgramEdit,
+                       QStringLiteral("/app:<programa>"));
     layout->addWidget(appGroup);
+
+    auto* sessionGroup = new QGroupBox(QStringLiteral("Sesión y conexión"), page);
+    auto* sessionForm = new QFormLayout(sessionGroup);
+    m_adminCheck = new WrappingCheckBox(QStringLiteral("Conectarse a la consola (sesión de administración)"),
+                                 sessionGroup);
+    addFormRowWithHint(sessionForm, QString(), m_adminCheck, QStringLiteral("+admin"));
+    m_restrictedAdminCheck =
+        new WrappingCheckBox(QStringLiteral("Modo de administración restringida"), sessionGroup);
+    addFormRowWithHint(sessionForm, QString(), m_restrictedAdminCheck,
+                       QStringLiteral("+restricted-admin"));
+    m_workareaCheck =
+        new WrappingCheckBox(QStringLiteral("Usar solo el área de trabajo disponible"), sessionGroup);
+    addFormRowWithHint(sessionForm, QString(), m_workareaCheck, QStringLiteral("+workarea"));
+    m_shellEdit = new QLineEdit(sessionGroup);
+    m_shellEdit->setObjectName(QStringLiteral("shellEdit"));
+    m_shellEdit->setPlaceholderText(QStringLiteral("por ejemplo: cmd.exe"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Shell alternativo:"), m_shellEdit,
+                       QStringLiteral("/shell:<comando>"));
+    m_shellDirEdit = new QLineEdit(sessionGroup);
+    m_shellDirEdit->setObjectName(QStringLiteral("shellDirEdit"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Directorio de trabajo:"), m_shellDirEdit,
+                       QStringLiteral("/shell-dir:<directorio>"));
+    m_clientHostnameEdit = new QLineEdit(sessionGroup);
+    m_clientHostnameEdit->setObjectName(QStringLiteral("clientHostnameEdit"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Nombre de equipo del cliente:"), m_clientHostnameEdit,
+                       QStringLiteral("/client-hostname:<nombre>"));
+    m_timeoutSpin = new QSpinBox(sessionGroup);
+    m_timeoutSpin->setObjectName(QStringLiteral("timeoutSpin"));
+    m_timeoutSpin->setRange(0, 600000);
+    m_timeoutSpin->setSpecialValueText(QStringLiteral("Predeterminado"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Tiempo de espera (ms):"), m_timeoutSpin,
+                       QStringLiteral("/timeout:<ms>"));
+    m_autoReconnectRetriesSpin = new QSpinBox(sessionGroup);
+    m_autoReconnectRetriesSpin->setObjectName(QStringLiteral("autoReconnectRetriesSpin"));
+    m_autoReconnectRetriesSpin->setRange(-1, 1000);
+    m_autoReconnectRetriesSpin->setSpecialValueText(QStringLiteral("Predeterminado"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Reintentos de reconexión:"),
+                       m_autoReconnectRetriesSpin,
+                       QStringLiteral("/auto-reconnect-max-retries:<n>"));
+    m_tlsSeclevelSpin = new QSpinBox(sessionGroup);
+    m_tlsSeclevelSpin->setObjectName(QStringLiteral("tlsSeclevelSpin"));
+    m_tlsSeclevelSpin->setRange(0, 5);
+    m_tlsSeclevelSpin->setSpecialValueText(QStringLiteral("Predeterminado"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Nivel de seguridad TLS:"), m_tlsSeclevelSpin,
+                       QStringLiteral("/tls:seclevel:<nivel>"));
+    m_preventLockSpin = new QSpinBox(sessionGroup);
+    m_preventLockSpin->setObjectName(QStringLiteral("preventLockSpin"));
+    m_preventLockSpin->setRange(0, 3600);
+    m_preventLockSpin->setSpecialValueText(QStringLiteral("Desactivado"));
+    m_preventLockSpin->setSuffix(QStringLiteral(" s"));
+    addFormRowWithHint(sessionForm, QStringLiteral("Evitar bloqueo de sesión:"), m_preventLockSpin,
+                       QStringLiteral("/prevent-session-lock:<segundos>"));
+    layout->addWidget(sessionGroup);
+
+    auto* proxyGroup = new QGroupBox(QStringLiteral("Proxy"), page);
+    auto* proxyForm = new QFormLayout(proxyGroup);
+    m_proxyTypeCombo = new QComboBox(proxyGroup);
+    m_proxyTypeCombo->setObjectName(QStringLiteral("proxyTypeCombo"));
+    m_proxyTypeCombo->addItem(QStringLiteral("HTTP"), QStringLiteral("http"));
+    m_proxyTypeCombo->addItem(QStringLiteral("SOCKS5"), QStringLiteral("socks5"));
+    addFormRowWithHint(proxyForm, QStringLiteral("Tipo:"), m_proxyTypeCombo,
+                       QStringLiteral("/proxy:<proto>://..."));
+    m_proxyHostEdit = new QLineEdit(proxyGroup);
+    m_proxyHostEdit->setObjectName(QStringLiteral("proxyHostEdit"));
+    addFormRowWithHint(proxyForm, QStringLiteral("Servidor:"), m_proxyHostEdit,
+                       QStringLiteral("/proxy:[proto://][usuario:contraseña@]<servidor>[:puerto]"));
+    m_proxyPortSpin = new QSpinBox(proxyGroup);
+    m_proxyPortSpin->setObjectName(QStringLiteral("proxyPortSpin"));
+    m_proxyPortSpin->setRange(0, 65535);
+    m_proxyPortSpin->setSpecialValueText(QStringLiteral("Predeterminado"));
+    addFormRowWithHint(proxyForm, QStringLiteral("Puerto:"), m_proxyPortSpin,
+                       QStringLiteral("/proxy:...:<puerto>"));
+    m_proxyUserEdit = new QLineEdit(proxyGroup);
+    m_proxyUserEdit->setObjectName(QStringLiteral("proxyUserEdit"));
+    addFormRowWithHint(proxyForm, QStringLiteral("Usuario:"), m_proxyUserEdit,
+                       QStringLiteral("/proxy:<usuario>@..."));
+    m_proxyPasswordEdit = new QLineEdit(proxyGroup);
+    m_proxyPasswordEdit->setObjectName(QStringLiteral("proxyPasswordEdit"));
+    m_proxyPasswordEdit->setEchoMode(QLineEdit::Password);
+    addFormRowWithHint(proxyForm, QStringLiteral("Contraseña:"), m_proxyPasswordEdit,
+                       QStringLiteral("/proxy:...:<contraseña>@..."));
+    layout->addWidget(proxyGroup);
+
+    auto* developerGroup = new QGroupBox(QStringLiteral("Desarrollo"), page);
+    auto* developerLayout = new QVBoxLayout(developerGroup);
+    m_developerModeCheck = new WrappingCheckBox(
+        QStringLiteral("Modo desarrollo (mostrar el comando de xfreerdp)"), developerGroup);
+    m_developerModeCheck->setObjectName(QStringLiteral("developerModeCheck"));
+    addWidgetWithHint(developerLayout, m_developerModeCheck,
+                      QStringLiteral("(Solo interfaz: no envía parámetros a xfreerdp)"));
+    m_commandPreviewEdit = new QPlainTextEdit(developerGroup);
+    m_commandPreviewEdit->setObjectName(QStringLiteral("commandPreviewEdit"));
+    m_commandPreviewEdit->setReadOnly(true);
+    m_commandPreviewEdit->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_commandPreviewEdit->setMinimumHeight(70);
+    QFont monospace(QStringLiteral("monospace"));
+    monospace.setStyleHint(QFont::Monospace);
+    m_commandPreviewEdit->setFont(monospace);
+    m_commandPreviewEdit->setVisible(false);
+    developerLayout->addWidget(m_commandPreviewEdit);
+    layout->addWidget(developerGroup);
     layout->addStretch(1);
 
     connect(m_gatewayCheck, &QCheckBox::toggled, m_gatewayHostEdit, &QLineEdit::setEnabled);
@@ -590,7 +933,122 @@ QWidget* ConnectionDialog::buildAdvancedPage()
     connect(m_gatewaySameCredentialsCheck, &QCheckBox::toggled, m_gatewayUserEdit,
             [this](bool same) { m_gatewayUserEdit->setEnabled(m_gatewayCheck->isChecked() && !same); });
     connect(m_remoteAppCheck, &QCheckBox::toggled, m_remoteProgramEdit, &QLineEdit::setEnabled);
+    connect(m_developerModeCheck, &QCheckBox::toggled, this,
+            &ConnectionDialog::updateDeveloperHints);
     return page;
+}
+
+void ConnectionDialog::updateCommandPreview()
+{
+    if (!m_commandPreviewEdit || !m_developerModeCheck)
+        return;
+
+    if (!m_developerModeCheck->isChecked())
+    {
+        m_commandPreviewEdit->clear();
+        m_commandPreviewEdit->setVisible(false);
+        return;
+    }
+
+    // Recolecta el formulario en una copia local para no alterar el borrador
+    // del perfil mientras el usuario escribe (collectForm modifica m_profile).
+    const ConnectionProfile saved = m_profile;
+    collectForm();
+    const ConnectionProfile preview = m_profile;
+    m_profile = saved;
+
+    SessionBackend::Credentials credentials;
+    credentials.username = m_userEdit->text().trimmed();
+    credentials.domain = m_domainEdit->text().trimmed();
+    credentials.password = m_passwordEdit->text();
+
+    const QStringList args = XFreeRdpLauncher::arguments(preview, credentials, false);
+    const QString command = QStringLiteral("%1 %2")
+                                .arg(XFreeRdpLauncher::programPath(),
+                                     args.join(QLatin1Char(' ')));
+    m_commandPreviewEdit->setPlainText(command);
+    m_commandPreviewEdit->setVisible(true);
+}
+
+QLabel* ConnectionDialog::createDeveloperHintLabel(const QString& hint, QWidget* parent)
+{
+    auto* label = new QLabel(hint, parent);
+    label->setProperty("developerHint", true);
+    label->setWordWrap(true);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    QFont mono(QStringLiteral("monospace"));
+    mono.setStyleHint(QFont::Monospace);
+    if (mono.pointSizeF() > 2.0)
+        mono.setPointSizeF(mono.pointSizeF() * 0.9);
+    label->setFont(mono);
+    label->setStyleSheet(QStringLiteral("color: #6b6b6b;"));
+    label->setContentsMargins(22, 0, 0, 6);
+    label->setVisible(false);
+    return label;
+}
+
+void ConnectionDialog::registerDeveloperHint(QWidget* control, QLabel* label)
+{
+    if (!control || !label)
+        return;
+
+    m_developerHints.append(qMakePair(control, label));
+    control->installEventFilter(this);
+}
+
+QLabel* ConnectionDialog::addWidgetWithHint(QBoxLayout* layout, QWidget* control, const QString& hint)
+{
+    layout->addWidget(control);
+    auto* label = createDeveloperHintLabel(hint, layout->parentWidget());
+    layout->addWidget(label);
+    registerDeveloperHint(control, label);
+    return label;
+}
+
+QLabel* ConnectionDialog::addFormRowWithHint(QFormLayout* form, const QString& labelText,
+                                             QWidget* control, const QString& hint)
+{
+    form->addRow(labelText, control);
+    auto* label = createDeveloperHintLabel(hint, form->parentWidget());
+    form->addRow(label);
+    registerDeveloperHint(control, label);
+    return label;
+}
+
+void ConnectionDialog::addHintRow(QFormLayout* form, QWidget* control, const QString& hint)
+{
+    auto* label = createDeveloperHintLabel(hint, form->parentWidget());
+    form->addRow(label);
+    registerDeveloperHint(control, label);
+}
+
+void ConnectionDialog::updateDeveloperHints()
+{
+    const bool developer =
+        m_developerModeCheck && m_developerModeCheck->isChecked();
+    for (const auto& entry : m_developerHints)
+    {
+        const bool enabled = entry.first && entry.first->isEnabled();
+        entry.second->setVisible(developer && enabled);
+    }
+}
+
+bool ConnectionDialog::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::EnabledChange)
+    {
+        if (auto* control = qobject_cast<QWidget*>(watched))
+        {
+            const bool developer =
+                m_developerModeCheck && m_developerModeCheck->isChecked();
+            for (const auto& entry : m_developerHints)
+            {
+                if (entry.first == control)
+                    entry.second->setVisible(developer && control->isEnabled());
+            }
+        }
+    }
+    return QDialog::eventFilter(watched, event);
 }
 
 void ConnectionDialog::refreshProfileList(const QString& selectId)
@@ -683,14 +1141,25 @@ void ConnectionDialog::loadProfileIntoForm(const ConnectionProfile& profile)
     m_rememberUserCheck->setChecked(profile.rememberUsername);
     m_rememberPasswordCheck->setChecked(profile.rememberPassword);
     m_clipboardCheck->setChecked(profile.redirectClipboard);
+    m_clipboardFilesCheck->setChecked(profile.redirectClipboardFiles);
+    m_clipboardFilesCheck->setEnabled(profile.redirectClipboard);
     m_drivesCheck->setChecked(profile.redirectDrives);
     m_printersCheck->setChecked(profile.redirectPrinters);
     m_homeDriveCheck->setChecked(profile.redirectHomeDrive);
+    m_multitouchCheck->setChecked(
+        profile.extraOptions.value(QStringLiteral("multitouch"), false).toBool());
     m_drivesEdit->setText(profile.drives.join(QLatin1Char(';')));
     m_audioCheck->setChecked(profile.redirectAudio);
     m_microphoneCheck->setChecked(profile.redirectMicrophone);
     m_dynamicResolutionCheck->setChecked(profile.dynamicResolution);
     m_multimonCheck->setChecked(profile.useMultimon);
+    m_spanMonitorsCheck->setChecked(profile.spanMonitors);
+    m_smartSizingCheck->setChecked(
+        profile.extraOptions.value(QStringLiteral("smartSizing"), false).toBool());
+    m_scaleCombo->setCurrentIndex(qMax(0, m_scaleCombo->findData(profile.scaleFactor)));
+    m_orientationCombo->setCurrentIndex(qMax(
+        0, m_orientationCombo->findData(
+               profile.extraOptions.value(QStringLiteral("orientation"), 0))));
     m_connectionBarCheck->setChecked(
         profile.extraOptions.value(QStringLiteral("showConnectionBar"), true).toBool());
     m_colorDepthCombo->setCurrentIndex(qMax(0, m_colorDepthCombo->findData(profile.colorDepth)));
@@ -708,6 +1177,19 @@ void ConnectionDialog::loadProfileIntoForm(const ConnectionProfile& profile)
         profile.extraOptions.value(QStringLiteral("bitmapCache"), true).toBool());
     m_reconnectCheck->setChecked(
         profile.extraOptions.value(QStringLiteral("autoReconnect"), true).toBool());
+    m_windowDragCheck->setChecked(
+        profile.extraOptions.value(QStringLiteral("windowDrag"), false).toBool());
+    m_compressionCombo->setCurrentIndex(qMax(
+        0, m_compressionCombo->findData(
+               profile.extraOptions.value(QStringLiteral("compressionLevel"), -1))));
+    m_gdiCombo->setCurrentIndex(qMax(
+        0, m_gdiCombo->findData(
+               profile.extraOptions.value(QStringLiteral("gdi"),
+                                          QStringLiteral("default")).toString())));
+    m_rfxCheck->setChecked(profile.extraOptions.value(QStringLiteral("rfx"), false).toBool());
+    m_nscCheck->setChecked(profile.extraOptions.value(QStringLiteral("nsc"), false).toBool());
+    m_jpegCheck->setChecked(profile.extraOptions.value(QStringLiteral("jpeg"), false).toBool());
+    m_videoCheck->setChecked(profile.extraOptions.value(QStringLiteral("video"), false).toBool());
 
     m_gatewayCheck->setChecked(profile.gatewayEnabled);
     m_gatewayHostEdit->setText(profile.gatewayHostname);
@@ -726,6 +1208,38 @@ void ConnectionDialog::loadProfileIntoForm(const ConnectionProfile& profile)
         profile.extraOptions.value(QStringLiteral("redirectPorts"), false).toBool());
     m_redirectSmartCardsCheck->setChecked(
         profile.extraOptions.value(QStringLiteral("redirectSmartCards"), false).toBool());
+    m_developerModeCheck->setChecked(
+        profile.extraOptions.value(QStringLiteral("developerMode"), false).toBool());
+
+    m_secProtocolCombo->setCurrentIndex(qMax(
+        0, m_secProtocolCombo->findData(
+               profile.extraOptions.value(QStringLiteral("securityProtocol"),
+                                          QStringLiteral("default")).toString())));
+    m_adminCheck->setChecked(profile.extraOptions.value(QStringLiteral("admin"), false).toBool());
+    m_restrictedAdminCheck->setChecked(
+        profile.extraOptions.value(QStringLiteral("restrictedAdmin"), false).toBool());
+    m_workareaCheck->setChecked(
+        profile.extraOptions.value(QStringLiteral("workarea"), false).toBool());
+    m_shellEdit->setText(profile.shell);
+    m_shellDirEdit->setText(
+        profile.extraOptions.value(QStringLiteral("shellWorkingDirectory")).toString());
+    m_clientHostnameEdit->setText(
+        profile.extraOptions.value(QStringLiteral("clientHostname")).toString());
+    m_timeoutSpin->setValue(profile.extraOptions.value(QStringLiteral("timeout"), 0).toInt());
+    m_autoReconnectRetriesSpin->setValue(
+        profile.extraOptions.value(QStringLiteral("autoReconnectMaxRetries"), -1).toInt());
+    m_tlsSeclevelSpin->setValue(
+        profile.extraOptions.value(QStringLiteral("tlsSeclevel"), 0).toInt());
+    m_preventLockSpin->setValue(
+        profile.extraOptions.value(QStringLiteral("preventSessionLock"), 0).toInt());
+    m_proxyTypeCombo->setCurrentIndex(qMax(
+        0, m_proxyTypeCombo->findData(profile.proxyType.isEmpty()
+                                          ? QStringLiteral("http")
+                                          : profile.proxyType)));
+    m_proxyHostEdit->setText(profile.proxyHost);
+    m_proxyPortSpin->setValue(profile.proxyPort);
+    m_proxyUserEdit->setText(profile.proxyUsername);
+    m_proxyPasswordEdit->setText(profile.proxyPassword);
 
     const QString keyboard = profile.extraOptions.value(QStringLiteral("keyboardHook"),
                                                          QStringLiteral("fullscreen")).toString();
@@ -750,6 +1264,8 @@ void ConnectionDialog::loadProfileIntoForm(const ConnectionProfile& profile)
 
     updateOkButton();
     updatePasswordHint();
+    updateCommandPreview();
+    updateDeveloperHints();
 }
 
 void ConnectionDialog::loadProfile(const ConnectionProfile& profile)
@@ -796,6 +1312,7 @@ void ConnectionDialog::collectForm()
     m_profile.rememberPassword = m_rememberPasswordCheck->isChecked();
     m_profile.promptForPassword = false;
     m_profile.redirectClipboard = m_clipboardCheck->isChecked();
+    m_profile.redirectClipboardFiles = m_clipboardFilesCheck->isChecked();
     m_profile.redirectDrives = m_drivesCheck->isChecked();
     m_profile.redirectPrinters = m_printersCheck->isChecked();
     m_profile.redirectHomeDrive = m_homeDriveCheck->isChecked();
@@ -804,12 +1321,20 @@ void ConnectionDialog::collectForm()
     m_profile.redirectMicrophone = m_microphoneCheck->isChecked();
     m_profile.dynamicResolution = m_dynamicResolutionCheck->isChecked();
     m_profile.useMultimon = m_multimonCheck->isChecked();
+    m_profile.spanMonitors = m_spanMonitorsCheck->isChecked();
+    m_profile.scaleFactor = m_scaleCombo->currentData().toInt();
     m_profile.colorDepth = m_colorDepthCombo->currentData().toInt();
     m_profile.networkType = m_networkCombo->currentData().toString();
     m_profile.wallpaper = m_wallpaperCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0");
     m_profile.fontSmoothing = m_fontSmoothingCheck->isChecked();
     m_profile.desktopComposition = m_desktopCompositionCheck->isChecked();
     m_profile.animations = m_animationsCheck->isChecked();
+    m_profile.shell = m_shellEdit->text().trimmed();
+    m_profile.proxyType = m_proxyTypeCombo->currentData().toString();
+    m_profile.proxyHost = m_proxyHostEdit->text().trimmed();
+    m_profile.proxyPort = m_proxyPortSpin->value();
+    m_profile.proxyUsername = m_proxyUserEdit->text().trimmed();
+    m_profile.proxyPassword = m_proxyPasswordEdit->text();
     m_profile.gatewayEnabled = m_gatewayCheck->isChecked();
     m_profile.gatewayHostname = m_gatewayHostEdit->text().trimmed();
     m_profile.gatewayPort = m_gatewayPortSpin->value();
@@ -829,6 +1354,36 @@ void ConnectionDialog::collectForm()
     m_profile.extraOptions.insert(QStringLiteral("redirectPorts"), m_redirectPortsCheck->isChecked());
     m_profile.extraOptions.insert(QStringLiteral("redirectSmartCards"),
                                   m_redirectSmartCardsCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("developerMode"),
+                                  m_developerModeCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("smartSizing"), m_smartSizingCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("orientation"),
+                                  m_orientationCombo->currentData());
+    m_profile.extraOptions.insert(QStringLiteral("multitouch"), m_multitouchCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("windowDrag"), m_windowDragCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("compressionLevel"),
+                                  m_compressionCombo->currentData());
+    m_profile.extraOptions.insert(QStringLiteral("gdi"), m_gdiCombo->currentData().toString());
+    m_profile.extraOptions.insert(QStringLiteral("rfx"), m_rfxCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("nsc"), m_nscCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("jpeg"), m_jpegCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("video"), m_videoCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("securityProtocol"),
+                                  m_secProtocolCombo->currentData().toString());
+    m_profile.extraOptions.insert(QStringLiteral("admin"), m_adminCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("restrictedAdmin"),
+                                  m_restrictedAdminCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("workarea"), m_workareaCheck->isChecked());
+    m_profile.extraOptions.insert(QStringLiteral("shellWorkingDirectory"),
+                                  m_shellDirEdit->text().trimmed());
+    m_profile.extraOptions.insert(QStringLiteral("clientHostname"),
+                                  m_clientHostnameEdit->text().trimmed());
+    m_profile.extraOptions.insert(QStringLiteral("timeout"), m_timeoutSpin->value());
+    m_profile.extraOptions.insert(QStringLiteral("autoReconnectMaxRetries"),
+                                  m_autoReconnectRetriesSpin->value());
+    m_profile.extraOptions.insert(QStringLiteral("tlsSeclevel"), m_tlsSeclevelSpin->value());
+    m_profile.extraOptions.insert(QStringLiteral("preventSessionLock"),
+                                  m_preventLockSpin->value());
     m_profile.extraOptions.insert(QStringLiteral("fullScreen"),
                                   m_resolutionCombo->currentIndex() == 0);
 
@@ -1290,7 +1845,7 @@ bool ConnectionDialog::promptForCredentials(QWidget* parent, ConnectionProfile& 
     password->setEchoMode(QLineEdit::Password);
     password->setObjectName(QStringLiteral("promptPasswordEdit"));
     password->setFocus();
-    auto* remember = new QCheckBox(QStringLiteral("Recordar contraseña"), &dialog);
+    auto* remember = new WrappingCheckBox(QStringLiteral("Recordar contraseña"), &dialog);
     remember->setChecked(rememberPassword || profile.rememberPassword);
     form->addRow(QStringLiteral("Usuario:"), user);
     form->addRow(QStringLiteral("Dominio:"), domain);

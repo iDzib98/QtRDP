@@ -1,5 +1,6 @@
 #include "core/ConnectionProfile.h"
 #include "core/CredentialStore.h"
+#include "core/GnomeFullscreen.h"
 #include "core/ProfileStore.h"
 #include "core/RdpFile.h"
 #include "core/SessionBackend.h"
@@ -16,6 +17,7 @@
 #include <QTranslator>
 
 #include <cstdio>
+#include <memory>
 
 namespace {
 
@@ -251,6 +253,30 @@ int main(int argc, char* argv[])
         }
     }
 
+    // La opción -f/--full-screen de la línea de órdenes se aplica como si
+    // el perfil se hubiera guardado con «Pantalla completa».
+    if (options.fullScreen)
+        profile.extraOptions.insert(QStringLiteral("fullScreen"), true);
+
+    // En GNOME/Wayland el toggle de FreeRDP no es fiable: QtRDP asume el
+    // control de la pantalla completa (EWMH + atajo global) y pide al launcher
+    // que no use /f ni la floatbar.
+    std::unique_ptr<qtrdp::GnomeFullscreen> gnomeFullscreen;
+    if (qtrdp::GnomeFullscreen::shouldActivate())
+    {
+        profile.extraOptions.insert(QStringLiteral("externalFullscreen"), true);
+        gnomeFullscreen = std::make_unique<qtrdp::GnomeFullscreen>();
+        std::fprintf(stderr, "[qtrdp] GNOME/Wayland: pantalla completa gestionada por QtRDP "
+                             "(atajo global + EWMH)\n");
+    }
+    else
+    {
+        std::fprintf(stderr, "[qtrdp] pantalla completa nativa de FreeRDP "
+                             "(XDG_CURRENT_DESKTOP=%s, XDG_SESSION_TYPE=%s)\n",
+                     qgetenv("XDG_CURRENT_DESKTOP").constData(),
+                     qgetenv("XDG_SESSION_TYPE").constData());
+    }
+
     qtrdp::XFreeRdpLauncher launcher;
     bool hasError = false;
     QObject::connect(&launcher, &qtrdp::XFreeRdpLauncher::outputReceived, &app,
@@ -283,6 +309,27 @@ int main(int argc, char* argv[])
         QMessageBox::critical(nullptr, QStringLiteral("Conexión de Escritorio remoto"),
                               QStringLiteral("No se pudo iniciar xfreerdp3."));
         return 1;
+    }
+
+    if (gnomeFullscreen)
+    {
+        gnomeFullscreen->setTargetPid(launcher.processId());
+        gnomeFullscreen->setStartFullscreen(
+            profile.extraOptions.value(QStringLiteral("fullScreen"), false).toBool());
+        QObject::connect(gnomeFullscreen.get(), &qtrdp::GnomeFullscreen::shortcutReady, &app,
+                         [](const QString& trigger)
+                         {
+                             std::fprintf(stderr,
+                                          "[qtrdp] pantalla completa con %s\n",
+                                          qPrintable(trigger));
+                         });
+        QObject::connect(gnomeFullscreen.get(), &qtrdp::GnomeFullscreen::shortcutFailed, &app,
+                         [](const QString& reason)
+                         {
+                             std::fprintf(stderr, "[qtrdp] atajo no disponible: %s\n",
+                                          qPrintable(reason));
+                         });
+        gnomeFullscreen->registerShortcut();
     }
 
     return app.exec();

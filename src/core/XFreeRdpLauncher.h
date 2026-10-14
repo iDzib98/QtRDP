@@ -22,12 +22,14 @@ public:
 
     static QString programPath();
     static QStringList arguments(const ConnectionProfile& profile,
-                                 const SessionBackend::Credentials& credentials);
+                                 const SessionBackend::Credentials& credentials,
+                                 bool resolveHostName = true);
 
     bool start(const ConnectionProfile& profile,
                const SessionBackend::Credentials& credentials);
     void stop();
     bool isRunning() const;
+    qint64 processId() const;
 
     struct ConnectionError
     {

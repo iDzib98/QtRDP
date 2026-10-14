@@ -132,6 +132,8 @@ ConnectionProfile RdpFile::fromText(const QString& text)
             profile.dynamicResolution = value == QLatin1String("2");
         else if (key == QLatin1String("clipboard redirection"))
             profile.redirectClipboard = parseBool(value, profile.redirectClipboard);
+        else if (key == QLatin1String("redirectclipboardfiles"))
+            profile.redirectClipboardFiles = parseBool(value, profile.redirectClipboardFiles);
         else if (key == QLatin1String("disable clipboard redirection"))
             profile.redirectClipboard = !parseBool(value, true);
         else if (key == QLatin1String("audiomode"))
@@ -178,6 +180,8 @@ ConnectionProfile RdpFile::fromText(const QString& text)
             profile.promptForPassword = parseBool(value, profile.promptForPassword);
         else if (key == QLatin1String("proxyserver"))
             profile.proxyHost = value;
+        else if (key == QLatin1String("proxytype"))
+            profile.proxyType = value;
         else if (key == QLatin1String("proxyport"))
             profile.proxyPort = value.toInt();
         else if (key == QLatin1String("proxyusername"))
@@ -272,6 +276,7 @@ QString RdpFile::toText(const ConnectionProfile& profile)
     appendOption(lines, QStringLiteral("domain"), profile.domain);
 
     appendFlag(lines, QStringLiteral("redirectclipboard"), profile.redirectClipboard);
+    appendFlag(lines, QStringLiteral("redirectclipboardfiles"), profile.redirectClipboardFiles);
     appendOption(lines, QStringLiteral("audiomode"), audioModeValue(profile));
     appendFlag(lines, QStringLiteral("redirectdrives"), profile.redirectDrives);
     appendFlag(lines, QStringLiteral("redirect home drive"), profile.redirectHomeDrive);
@@ -306,6 +311,17 @@ QString RdpFile::toText(const ConnectionProfile& profile)
 
     if (!profile.wallpaper.isEmpty())
         appendOption(lines, QStringLiteral("wallpaper"), profile.wallpaper);
+
+    if (!profile.proxyHost.isEmpty())
+    {
+        if (!profile.proxyType.isEmpty())
+            appendOption(lines, QStringLiteral("proxytype"), profile.proxyType);
+        appendOption(lines, QStringLiteral("proxyserver"), profile.proxyHost);
+        if (profile.proxyPort > 0)
+            appendOption(lines, QStringLiteral("proxyport"), QString::number(profile.proxyPort));
+        if (!profile.proxyUsername.isEmpty())
+            appendOption(lines, QStringLiteral("proxyusername"), profile.proxyUsername);
+    }
 
     for (auto it = profile.extraOptions.constBegin(); it != profile.extraOptions.constEnd(); ++it)
         appendOption(lines, it.key(), it.value().toString());

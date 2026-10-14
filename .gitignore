@@ -3,6 +3,7 @@ third_party/
 
 # Build directories
 build/
+build-*/
 build-shadow/
 build-flatpak/
 build-flatpak-test/

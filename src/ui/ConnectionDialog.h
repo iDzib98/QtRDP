@@ -5,18 +5,26 @@
 #include "core/SessionBackend.h"
 
 #include <QDialog>
+#include <QList>
+#include <QPair>
 
 QT_BEGIN_NAMESPACE
+class QBoxLayout;
 class QCheckBox;
 class QComboBox;
 class QDialogButtonBox;
+class QEvent;
+class QFormLayout;
 class QGroupBox;
 class QLabel;
+class QLayout;
 class QLineEdit;
 class QListWidget;
+class QPlainTextEdit;
 class QTabWidget;
 class QSpinBox;
 class QShowEvent;
+class QTimer;
 class QToolButton;
 class QWidget;
 QT_END_NAMESPACE
@@ -65,6 +73,7 @@ private:
     bool persistCredentials(QString* error = nullptr);
     void accept() override;
     void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
     void onNewProfile();
     void onDuplicateProfile();
@@ -75,7 +84,18 @@ private:
     void onProfileNameChanged(const QString& name);
     void setOptionsExpanded(bool expanded);
     void updateQuickUserLabel();
+    void updateCommandPreview();
     void saveAsNewProfile();
+
+    // Etiquetas de ayuda del modo desarrollo: muestran el parámetro de xfreerdp
+    // que habilita cada campo o casilla cuando el modo desarrollo está activo.
+    QLabel* createDeveloperHintLabel(const QString& hint, QWidget* parent);
+    void registerDeveloperHint(QWidget* control, QLabel* label);
+    QLabel* addWidgetWithHint(QBoxLayout* layout, QWidget* control, const QString& hint);
+    QLabel* addFormRowWithHint(QFormLayout* form, const QString& labelText, QWidget* control,
+                               const QString& hint);
+    void addHintRow(QFormLayout* form, QWidget* control, const QString& hint);
+    void updateDeveloperHints();
 
     QLineEdit* m_hostEdit = nullptr;
     QSpinBox* m_portSpin = nullptr;
@@ -94,6 +114,23 @@ private:
     QComboBox* m_authWarningCombo = nullptr;
     QComboBox* m_keyboardCombo = nullptr;
     QComboBox* m_quickHostCombo = nullptr;
+    QComboBox* m_scaleCombo = nullptr;
+    QComboBox* m_orientationCombo = nullptr;
+    QComboBox* m_gdiCombo = nullptr;
+    QComboBox* m_compressionCombo = nullptr;
+    QComboBox* m_secProtocolCombo = nullptr;
+    QComboBox* m_proxyTypeCombo = nullptr;
+    QLineEdit* m_clientHostnameEdit = nullptr;
+    QLineEdit* m_shellEdit = nullptr;
+    QLineEdit* m_shellDirEdit = nullptr;
+    QLineEdit* m_proxyHostEdit = nullptr;
+    QLineEdit* m_proxyUserEdit = nullptr;
+    QLineEdit* m_proxyPasswordEdit = nullptr;
+    QSpinBox* m_proxyPortSpin = nullptr;
+    QSpinBox* m_timeoutSpin = nullptr;
+    QSpinBox* m_tlsSeclevelSpin = nullptr;
+    QSpinBox* m_preventLockSpin = nullptr;
+    QSpinBox* m_autoReconnectRetriesSpin = nullptr;
     QCheckBox* m_rememberUserCheck = nullptr;
     QCheckBox* m_rememberPasswordCheck = nullptr;
     QCheckBox* m_clipboardCheck = nullptr;
@@ -117,6 +154,21 @@ private:
     QCheckBox* m_redirectPortsCheck = nullptr;
     QCheckBox* m_redirectSmartCardsCheck = nullptr;
     QCheckBox* m_webAccountCheck = nullptr;
+    QCheckBox* m_developerModeCheck = nullptr;
+    QCheckBox* m_spanMonitorsCheck = nullptr;
+    QCheckBox* m_smartSizingCheck = nullptr;
+    QCheckBox* m_clipboardFilesCheck = nullptr;
+    QCheckBox* m_multitouchCheck = nullptr;
+    QCheckBox* m_windowDragCheck = nullptr;
+    QCheckBox* m_rfxCheck = nullptr;
+    QCheckBox* m_nscCheck = nullptr;
+    QCheckBox* m_jpegCheck = nullptr;
+    QCheckBox* m_videoCheck = nullptr;
+    QCheckBox* m_adminCheck = nullptr;
+    QCheckBox* m_restrictedAdminCheck = nullptr;
+    QCheckBox* m_workareaCheck = nullptr;
+    QPlainTextEdit* m_commandPreviewEdit = nullptr;
+    QTimer* m_commandPreviewTimer = nullptr;
     QLabel* m_errorLabel = nullptr;
     QLabel* m_passwordHint = nullptr;
     QLabel* m_quickUserLabel = nullptr;
@@ -141,6 +193,7 @@ private:
     ConnectionProfile m_profile;
     QString m_selectedId;
     bool m_populating = false;
+    QList<QPair<QWidget*, QLabel*>> m_developerHints;
 };
 
 } // namespace qtrdp

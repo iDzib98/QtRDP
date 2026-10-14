@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build-flatpak}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(sed -n 's/^[[:space:]]*VERSION[[:space:]]*//p' "${ROOT_DIR}/CMakeLists.txt" | head -n 1)}"
-PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.1}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.2.0}"
 
 if ! command -v flatpak-builder >/dev/null 2>&1; then
     echo "flatpak-builder no está instalado. Instale con:" >&2

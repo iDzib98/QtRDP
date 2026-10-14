@@ -208,6 +208,139 @@ private slots:
         QVERIFY(args.contains(QStringLiteral("/sound")));
         QVERIFY(args.contains(QStringLiteral("/microphone")));
         QVERIFY(args.contains(QStringLiteral("/drive:home,/home/soporte")));
+        // Por omisión se muestra la barra de conexión (show:always, workaround
+        // de FreeRDP #11737) y no se arranca en fullscreen.
+        QVERIFY(args.contains(
+            QStringLiteral("/floatbar:sticky:on,default:visible,show:always")));
+        QVERIFY(!args.contains(QStringLiteral("/f")));
+
+        profile.extraOptions.insert(QStringLiteral("fullScreen"), true);
+        profile.extraOptions.insert(QStringLiteral("showConnectionBar"), false);
+        const QStringList fullScreenArgs = XFreeRdpLauncher::arguments(profile, credentials);
+        QVERIFY(fullScreenArgs.contains(QStringLiteral("/f")));
+        QVERIFY(!fullScreenArgs.contains(
+            QStringLiteral("/floatbar:sticky:on,default:visible,show:always")));
+
+        // En GNOME/Wayland QtRDP controla la pantalla completa por EWMH: no
+        // debe delegar ni en /f ni en la floatbar de FreeRDP.
+        profile.extraOptions.insert(QStringLiteral("showConnectionBar"), true);
+        profile.extraOptions.insert(QStringLiteral("externalFullscreen"), true);
+        const QStringList externalArgs = XFreeRdpLauncher::arguments(profile, credentials);
+        QVERIFY(!externalArgs.contains(QStringLiteral("/f")));
+        QVERIFY(!externalArgs.contains(
+            QStringLiteral("/floatbar:sticky:on,default:visible,show:always")));
+    }
+
+    void xfreerdpOptionsMapping()
+    {
+        ConnectionProfile profile;
+        profile.host = QStringLiteral("10.0.0.5");
+        profile.username = QStringLiteral("soporte");
+        profile.dynamicResolution = true;
+        profile.redirectClipboard = true;
+        profile.redirectClipboardFiles = false;
+        profile.networkType = QStringLiteral("lan");
+        profile.themesEnabled = true;
+        profile.fontSmoothing = false;
+        profile.desktopComposition = true;
+        profile.animations = false;
+        profile.wallpaper = QStringLiteral("0");
+        profile.spanMonitors = true;
+        profile.scaleFactor = 140;
+        profile.shell = QStringLiteral("cmd.exe");
+        profile.proxyType = QStringLiteral("http");
+        profile.proxyHost = QStringLiteral("proxy.local");
+        profile.proxyPort = 8080;
+        profile.proxyUsername = QStringLiteral("u");
+        profile.proxyPassword = QStringLiteral("p");
+        profile.extraOptions.insert(QStringLiteral("authenticationLevel"), 2);
+        profile.extraOptions.insert(QStringLiteral("redirectSmartCards"), true);
+        profile.extraOptions.insert(QStringLiteral("multitouch"), true);
+        profile.extraOptions.insert(QStringLiteral("smartSizing"), true);
+        profile.extraOptions.insert(QStringLiteral("windowDrag"), true);
+        profile.extraOptions.insert(QStringLiteral("orientation"), 90);
+        profile.extraOptions.insert(QStringLiteral("gdi"), QStringLiteral("sw"));
+        profile.extraOptions.insert(QStringLiteral("rfx"), true);
+        profile.extraOptions.insert(QStringLiteral("securityProtocol"), QStringLiteral("nla"));
+        profile.extraOptions.insert(QStringLiteral("admin"), true);
+        profile.extraOptions.insert(QStringLiteral("timeout"), 5000);
+        profile.extraOptions.insert(QStringLiteral("tlsSeclevel"), 1);
+        profile.extraOptions.insert(QStringLiteral("preventSessionLock"), 60);
+
+        SessionBackend::Credentials credentials;
+        credentials.username = profile.username;
+
+        const QStringList args = XFreeRdpLauncher::arguments(profile, credentials);
+
+        // Certificado según el nivel de autenticación (2 = no conectarse).
+        QVERIFY(args.contains(QStringLiteral("/cert:deny")));
+        // Experiencia remota bidireccional.
+        QVERIFY(args.contains(QStringLiteral("-wallpaper")));
+        QVERIFY(args.contains(QStringLiteral("+themes")));
+        QVERIFY(args.contains(QStringLiteral("-fonts")));
+        QVERIFY(args.contains(QStringLiteral("+aero")));
+        QVERIFY(args.contains(QStringLiteral("-menu-anims")));
+        QVERIFY(args.contains(QStringLiteral("/network:lan")));
+        QVERIFY(args.contains(QStringLiteral("/cache:bitmap:on")));
+        QVERIFY(args.contains(QStringLiteral("+auto-reconnect")));
+        // Portapapeles sin archivos.
+        QVERIFY(args.contains(QStringLiteral("/clipboard:files-to:off")));
+        QVERIFY(!args.contains(QStringLiteral("/clipboard")));
+        // Pantalla.
+        QVERIFY(args.contains(QStringLiteral("+span")));
+        QVERIFY(args.contains(QStringLiteral("/scale:140")));
+        QVERIFY(args.contains(QStringLiteral("+smart-sizing")));
+        QVERIFY(args.contains(QStringLiteral("/orientation:90")));
+        // Rendimiento.
+        QVERIFY(args.contains(QStringLiteral("+window-drag")));
+        QVERIFY(args.contains(QStringLiteral("/gdi:sw")));
+        QVERIFY(args.contains(QStringLiteral("+rfx")));
+        // Sesión / seguridad.
+        QVERIFY(args.contains(QStringLiteral("/sec:nla")));
+        QVERIFY(args.contains(QStringLiteral("+admin")));
+        QVERIFY(args.contains(QStringLiteral("/timeout:5000")));
+        QVERIFY(args.contains(QStringLiteral("/tls:seclevel:1")));
+        QVERIFY(args.contains(QStringLiteral("/prevent-session-lock:60")));
+        QVERIFY(args.contains(QStringLiteral("/shell:cmd.exe")));
+        // Dispositivos.
+        QVERIFY(args.contains(QStringLiteral("/smartcard")));
+        QVERIFY(args.contains(QStringLiteral("+multitouch")));
+        // Proxy.
+        QVERIFY(args.contains(QStringLiteral("/proxy:http://u:p@proxy.local:8080")));
+
+        // La puerta de enlace con «mismas credenciales» no envía /gu.
+        profile.gatewayEnabled = true;
+        profile.gatewayHostname = QStringLiteral("gw.local");
+        profile.gatewayPort = 443;
+        profile.gatewaySameCredentials = true;
+        profile.gatewayUsername = QStringLiteral("otro");
+        const QStringList sameCreds = XFreeRdpLauncher::arguments(profile, credentials);
+        QVERIFY(sameCreds.contains(QStringLiteral("/g:gw.local")));
+        QVERIFY(!sameCreds.contains(QStringLiteral("/gu:otro")));
+
+        profile.gatewaySameCredentials = false;
+        const QStringList diffCreds = XFreeRdpLauncher::arguments(profile, credentials);
+        QVERIFY(diffCreds.contains(QStringLiteral("/gu:otro")));
+
+        // Mapeo de teclado «en el equipo remoto» libera el teclado.
+        profile.extraOptions.insert(QStringLiteral("keyboardHook"), QStringLiteral("remote"));
+        QVERIFY(XFreeRdpLauncher::arguments(profile, credentials)
+                    .contains(QStringLiteral("-grab-keyboard")));
+    }
+
+    void xfreerdpArgumentsSkipHostResolution()
+    {
+        // El modo desarrollo genera la vista previa sin resolver el nombre de
+        // equipo, por lo que el argumento /v debe conservar el nombre tal cual.
+        ConnectionProfile profile;
+        profile.host = QStringLiteral("equipo-inexistente.local");
+        profile.port = 3390;
+        profile.dynamicResolution = false;
+
+        SessionBackend::Credentials credentials;
+        const QStringList args =
+            XFreeRdpLauncher::arguments(profile, credentials, /*resolveHostName=*/false);
+        QVERIFY(args.contains(QStringLiteral("/v:equipo-inexistente.local:3390")));
     }
 
     void profileRoundTrip()

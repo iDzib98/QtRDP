@@ -111,9 +111,9 @@ QString resolveHost(const QString& host)
     return host;
 }
 
-QString targetValue(const ConnectionProfile& profile)
+QString targetValue(const ConnectionProfile& profile, bool resolveHostName)
 {
-    const QString host = resolveHost(profile.host);
+    const QString host = resolveHostName ? resolveHost(profile.host) : profile.host;
     if (profile.port == 3389)
         return host;
 
@@ -343,11 +343,23 @@ QString XFreeRdpLauncher::programPath()
 }
 
 QStringList XFreeRdpLauncher::arguments(const ConnectionProfile& profile,
-                                        const SessionBackend::Credentials& credentials)
+                                        const SessionBackend::Credentials& credentials,
+                                        bool resolveHostName)
 {
     QStringList result;
-    result << QStringLiteral("/v:%1").arg(targetValue(profile));
-    result << QStringLiteral("/cert:tofu");
+    result << QStringLiteral("/v:%1").arg(targetValue(profile, resolveHostName));
+
+    // «Si se producen errores de autenticación»: 2 = no conectarse (deny),
+    // 1 = avisar (tofu, valor por omisión) y 0 = conectarse igualmente (ignore).
+    const int authenticationLevel =
+        profile.extraOptions.value(QStringLiteral("authenticationLevel"), 1).toInt();
+    QString certMode = QStringLiteral("tofu");
+    if (authenticationLevel == 2)
+        certMode = QStringLiteral("deny");
+    else if (authenticationLevel == 0)
+        certMode = QStringLiteral("ignore");
+    result << QStringLiteral("/cert:%1").arg(certMode);
+
     const QString title = !profile.name.isEmpty() ? profile.name : profile.host;
     result << QStringLiteral("/title:%1").arg(title);
 
@@ -375,13 +387,152 @@ QStringList XFreeRdpLauncher::arguments(const ConnectionProfile& profile,
     if (!credentials.password.isEmpty())
         result << QStringLiteral("/p:%1").arg(credentials.password);
 
+    // Protocolo de seguridad forzado (/sec:nla, /sec:tls, /sec:rdp, /sec:ext).
+    const QString securityProtocol =
+        profile.extraOptions.value(QStringLiteral("securityProtocol")).toString();
+    if (!securityProtocol.isEmpty() && securityProtocol != QLatin1String("default"))
+        result << QStringLiteral("/sec:%1").arg(securityProtocol);
+
+    if (profile.extraOptions.value(QStringLiteral("admin"), false).toBool())
+        result << QStringLiteral("+admin");
+    if (profile.extraOptions.value(QStringLiteral("restrictedAdmin"), false).toBool())
+        result << QStringLiteral("+restricted-admin");
+    if (profile.extraOptions.value(QStringLiteral("workarea"), false).toBool())
+        result << QStringLiteral("+workarea");
+
+    if (!profile.shell.isEmpty())
+        result << QStringLiteral("/shell:%1").arg(profile.shell);
+    const QString shellDir =
+        profile.extraOptions.value(QStringLiteral("shellWorkingDirectory")).toString();
+    if (!shellDir.isEmpty())
+        result << QStringLiteral("/shell-dir:%1").arg(shellDir);
+
+    const QString clientHostname =
+        profile.extraOptions.value(QStringLiteral("clientHostname")).toString();
+    if (!clientHostname.isEmpty())
+        result << QStringLiteral("/client-hostname:%1").arg(clientHostname);
+
+    const int timeout = profile.extraOptions.value(QStringLiteral("timeout"), 0).toInt();
+    if (timeout > 0)
+        result << QStringLiteral("/timeout:%1").arg(timeout);
+
+    const int tlsSeclevel = profile.extraOptions.value(QStringLiteral("tlsSeclevel"), 0).toInt();
+    if (tlsSeclevel > 0)
+        result << QStringLiteral("/tls:seclevel:%1").arg(tlsSeclevel);
+
+    const int preventLock =
+        profile.extraOptions.value(QStringLiteral("preventSessionLock"), 0).toInt();
+    if (preventLock > 0)
+        result << QStringLiteral("/prevent-session-lock:%1").arg(preventLock);
+
+    // Proxy explícito: /proxy:[<proto>://][<user>:<password>@]<host>[:<port>].
+    if (!profile.proxyHost.isEmpty())
+    {
+        QString proxy;
+        if (!profile.proxyType.isEmpty())
+            proxy += profile.proxyType + QStringLiteral("://");
+        if (!profile.proxyUsername.isEmpty())
+        {
+            proxy += profile.proxyUsername;
+            if (!profile.proxyPassword.isEmpty())
+                proxy += QLatin1Char(':') + profile.proxyPassword;
+            proxy += QLatin1Char('@');
+        }
+        proxy += profile.proxyHost;
+        if (profile.proxyPort > 0)
+            proxy += QStringLiteral(":%1").arg(profile.proxyPort);
+        result << QStringLiteral("/proxy:%1").arg(proxy);
+    }
+
     if (profile.dynamicResolution)
         result << QStringLiteral("/dynamic-resolution");
     else if ((profile.desktopWidth > 0) && (profile.desktopHeight > 0))
         result << QStringLiteral("/size:%1x%2").arg(profile.desktopWidth).arg(profile.desktopHeight);
 
+    if (profile.spanMonitors)
+        result << QStringLiteral("+span");
+    if ((profile.scaleFactor > 0) && (profile.scaleFactor != 100))
+        result << QStringLiteral("/scale:%1").arg(profile.scaleFactor);
+    if (profile.extraOptions.value(QStringLiteral("smartSizing"), false).toBool())
+        result << QStringLiteral("+smart-sizing");
+    const int orientation = profile.extraOptions.value(QStringLiteral("orientation"), 0).toInt();
+    if (orientation > 0)
+        result << QStringLiteral("/orientation:%1").arg(orientation);
+
+    // En GNOME/Wayland el toggle de pantalla completa de FreeRDP es poco fiable
+    // (Mutter reatrapa la ventana, FreeRDP #10993 / #11737). En ese caso QtRDP
+    // gestiona el fullscreen por EWMH y el atajo global, así que no se pasa /f
+    // ni la floatbar (su botón usaría el camino defectuoso).
+    const bool externalFullscreen =
+        profile.extraOptions.value(QStringLiteral("externalFullscreen"), false).toBool();
+
+    // Pantalla completa al iniciar (WinBoat abre en fullscreen; por omisión,
+    // ventana normal y <Ctrl>+<Alt>+<Enter> alterna el modo).
+    if (!externalFullscreen && profile.extraOptions.value(QStringLiteral("fullScreen"), false).toBool())
+        result << QStringLiteral("/f");
+
+    // Barra de conexión azul pineable, como mstsc/WinBoat.
+    // sticky:on la fija (no se autooculta), default:visible la muestra siempre
+    // y show:always la mantiene visible en ventana y fullscreen. Se usa
+    // show:always (y no show:fullscreen) porque en Wayland/XWayland el toggle
+    // de pantalla completa con show:fullscreen se atasca tras el primer uso
+    // (FreeRDP #10993 / #11737): al restaurar, la imagen queda en fullscreen y
+    // la barra desaparece. show:always es el workaround documentado.
+    if (!externalFullscreen &&
+        profile.extraOptions.value(QStringLiteral("showConnectionBar"), true).toBool())
+        result << QStringLiteral("/floatbar:sticky:on,default:visible,show:always");
+
+    // Experiencia remota (equivalen a las casillas de mstsc). Se usan formas
+    // explícitas +toggle/-toggle para que el resultado dependa del perfil.
+    if (profile.wallpaper == QLatin1String("0"))
+        result << QStringLiteral("-wallpaper");
+    result << (profile.themesEnabled ? QStringLiteral("+themes") : QStringLiteral("-themes"));
+    result << (profile.fontSmoothing ? QStringLiteral("+fonts") : QStringLiteral("-fonts"));
+    result << (profile.desktopComposition ? QStringLiteral("+aero") : QStringLiteral("-aero"));
+    result << (profile.animations ? QStringLiteral("+menu-anims") : QStringLiteral("-menu-anims"));
+
+    if (!profile.networkType.isEmpty())
+        result << QStringLiteral("/network:%1").arg(profile.networkType);
+
+    const bool bitmapCache =
+        profile.extraOptions.value(QStringLiteral("bitmapCache"), true).toBool();
+    result << QStringLiteral("/cache:bitmap:%1")
+                  .arg(bitmapCache ? QStringLiteral("on") : QStringLiteral("off"));
+
+    const bool autoReconnect =
+        profile.extraOptions.value(QStringLiteral("autoReconnect"), true).toBool();
+    result << (autoReconnect ? QStringLiteral("+auto-reconnect")
+                             : QStringLiteral("-auto-reconnect"));
+    const int reconnectRetries =
+        profile.extraOptions.value(QStringLiteral("autoReconnectMaxRetries"), -1).toInt();
+    if (reconnectRetries >= 0)
+        result << QStringLiteral("/auto-reconnect-max-retries:%1").arg(reconnectRetries);
+
+    if (profile.extraOptions.value(QStringLiteral("windowDrag"), false).toBool())
+        result << QStringLiteral("+window-drag");
+
+    const int compressionLevel =
+        profile.extraOptions.value(QStringLiteral("compressionLevel"), -1).toInt();
+    if (compressionLevel >= 0)
+        result << QStringLiteral("/compression-level:%1").arg(compressionLevel);
+
+    if (profile.extraOptions.value(QStringLiteral("rfx"), false).toBool())
+        result << QStringLiteral("+rfx");
+    if (profile.extraOptions.value(QStringLiteral("nsc"), false).toBool())
+        result << QStringLiteral("+nsc");
+    if (profile.extraOptions.value(QStringLiteral("jpeg"), false).toBool())
+        result << QStringLiteral("+jpeg");
+    if (profile.extraOptions.value(QStringLiteral("video"), false).toBool())
+        result << QStringLiteral("+video");
+
+    const QString gdi = profile.extraOptions.value(QStringLiteral("gdi")).toString();
+    if (gdi == QLatin1String("sw") || gdi == QLatin1String("hw"))
+        result << QStringLiteral("/gdi:%1").arg(gdi);
+
     if (profile.redirectClipboard)
-        result << QStringLiteral("/clipboard");
+        result << (profile.redirectClipboardFiles
+                       ? QStringLiteral("/clipboard")
+                       : QStringLiteral("/clipboard:files-to:off"));
     if (profile.redirectAudio)
         result << QStringLiteral("/sound");
     if (profile.redirectMicrophone)
@@ -396,12 +547,25 @@ QStringList XFreeRdpLauncher::arguments(const ConnectionProfile& profile,
             appendDrive(result, drive);
     }
 
+    if (profile.extraOptions.value(QStringLiteral("redirectSmartCards"), false).toBool())
+        result << QStringLiteral("/smartcard");
+    if (profile.extraOptions.value(QStringLiteral("multitouch"), false).toBool())
+        result << QStringLiteral("+multitouch");
+
+    // «Aplicar combinaciones de teclas»: solo «en el equipo remoto» difiere del
+    // comportamiento por omisión (que captura el teclado localmente).
+    if (profile.extraOptions.value(QStringLiteral("keyboardHook")).toString() ==
+        QLatin1String("remote"))
+        result << QStringLiteral("-grab-keyboard");
+
     if (profile.useMultimon)
         result << QStringLiteral("/multimon");
     if (profile.gatewayEnabled && !profile.gatewayHostname.isEmpty())
     {
         result << QStringLiteral("/g:%1").arg(profile.gatewayHostname);
-        if (!profile.gatewayUsername.isEmpty())
+        // Con «mismas credenciales» no se envía usuario de puerta de enlace:
+        // FreeRDP reutiliza entonces las de la sesión.
+        if (!profile.gatewaySameCredentials && !profile.gatewayUsername.isEmpty())
             result << QStringLiteral("/gu:%1").arg(profile.gatewayUsername);
         if (profile.gatewayPort > 0)
             result << QStringLiteral("/gp:%1").arg(profile.gatewayPort);
@@ -452,6 +616,11 @@ void XFreeRdpLauncher::stop()
 bool XFreeRdpLauncher::isRunning() const
 {
     return m_process && (m_process->state() != QProcess::NotRunning);
+}
+
+qint64 XFreeRdpLauncher::processId() const
+{
+    return m_process ? m_process->processId() : 0;
 }
 
 } // namespace qtrdp

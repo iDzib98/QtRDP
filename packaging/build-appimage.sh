@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(sed -n 's/^[[:space:]]*VERSION[[:space:]]*//p' "${ROOT_DIR}/CMakeLists.txt" | head -n 1)}"
-PACKAGE_VERSION="${PACKAGE_VERSION:-0.1.1}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.2.0}"
 LINUXDEPLOY="${LINUXDEPLOY:-linuxdeploy}"
 APPIMAGETOOL="${APPIMAGETOOL:-appimagetool}"
 

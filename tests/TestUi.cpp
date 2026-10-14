@@ -15,6 +15,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPlainTextEdit>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QListWidget>
 #include <QTabWidget>
@@ -380,6 +383,85 @@ private slots:
         QVERIFY(list->height() >= 60);
         QVERIFY(host->width() >= 200);
         QCOMPARE(buttons->button(QDialogButtonBox::Ok)->text(), QStringLiteral("Conectar"));
+
+        dialog.hide();
+    }
+
+    void connectionDialogShowsXFreeRdpHintsInDeveloperMode()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        qputenv("XDG_CONFIG_HOME", dir.path().toUtf8());
+
+        ConnectionDialog dialog;
+        dialog.resize(430, 285);
+        dialog.show();
+        QCoreApplication::processEvents();
+        auto* toggle = dialog.findChild<QToolButton*>(QStringLiteral("optionsToggleButton"));
+        auto* tabs = dialog.findChild<QTabWidget*>(QStringLiteral("connectionOptionsTabs"));
+        auto* developer = dialog.findChild<QCheckBox*>(QStringLiteral("developerModeCheck"));
+        auto* preview = dialog.findChild<QPlainTextEdit*>(QStringLiteral("commandPreviewEdit"));
+        QVERIFY(toggle && tabs && developer && preview);
+
+        auto visibleHints = [&dialog]()
+        {
+            QList<QLabel*> hints;
+            for (QLabel* label : dialog.findChildren<QLabel*>())
+            {
+                if (label->property("developerHint").toBool() && label->isVisible())
+                    hints.append(label);
+            }
+            return hints;
+        };
+
+        toggle->click();
+        QCoreApplication::processEvents();
+
+        QVERIFY(!developer->isChecked());
+        for (int i = 0; i < tabs->count(); ++i)
+        {
+            tabs->setCurrentIndex(i);
+            QCoreApplication::processEvents();
+            QVERIFY(visibleHints().isEmpty());
+        }
+
+        developer->setChecked(true);
+        QTest::qWait(250);
+
+        bool hasHostHint = false;
+        bool hasSpanHint = false;
+        bool hasAdminHint = false;
+        for (int i = 0; i < tabs->count(); ++i)
+        {
+            tabs->setCurrentIndex(i);
+            QCoreApplication::processEvents();
+            for (QLabel* label : dialog.findChildren<QLabel*>())
+            {
+                if (!label->property("developerHint").toBool() || !label->isVisible())
+                    continue;
+                if (label->text().contains(QStringLiteral("/v:")))
+                    hasHostHint = true;
+                if (label->text().contains(QStringLiteral("+span")))
+                    hasSpanHint = true;
+                if (label->text().contains(QStringLiteral("+admin")))
+                    hasAdminHint = true;
+            }
+            if (auto* area = qobject_cast<QScrollArea*>(tabs->widget(i)))
+                QVERIFY(!area->horizontalScrollBar()->isVisible());
+        }
+        QVERIFY(hasHostHint);
+        QVERIFY(hasSpanHint);
+        QVERIFY(hasAdminHint);
+
+        tabs->setCurrentIndex(4);
+        QCoreApplication::processEvents();
+        QVERIFY(developer->isChecked());
+        QVERIFY(dialog.findChild<QPlainTextEdit*>(QStringLiteral("commandPreviewEdit"))->isVisible());
+
+        developer->setChecked(false);
+        QTest::qWait(250);
+        QCoreApplication::processEvents();
+        QVERIFY(!dialog.findChild<QPlainTextEdit*>(QStringLiteral("commandPreviewEdit"))->isVisible());
 
         dialog.hide();
     }
